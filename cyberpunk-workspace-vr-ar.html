@@ -607,29 +607,28 @@
         function createDigitalClock() {
             const group = new THREE.Group();
             
-            // Clock body
-            const body = new THREE.Mesh(
-                new THREE.BoxGeometry(0.8, 0.3, 0.05),
-                new THREE.MeshStandardMaterial({ 
-                    color: 0x0a0a1a, 
-                    metalness: 0.9, 
-                    roughness: 0.2,
-                    emissive: 0x001100,
-                    emissiveIntensity: 0.3
+            // Background panel (semi-transparent)
+            const panel = new THREE.Mesh(
+                new THREE.PlaneGeometry(1, 0.6),
+                new THREE.MeshBasicMaterial({
+                    color: 0x00ff00,
+                    transparent: true,
+                    opacity: 0.15,
+                    side: THREE.DoubleSide
                 })
             );
-            group.add(body);
+            group.add(panel);
             
-            // Neon border
-            const borderGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.8, 0.3, 0.05));
+            // Border
+            const borderGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 0.6));
             const borderMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
             const border = new THREE.LineSegments(borderGeo, borderMat);
             group.add(border);
             
-            // Time display
+            // Clock display canvas
             const clockCanvas = document.createElement('canvas');
             clockCanvas.width = 512;
-            clockCanvas.height = 256;
+            clockCanvas.height = 512;
             const clockCtx = clockCanvas.getContext('2d');
             const clockTex = new THREE.CanvasTexture(clockCanvas);
             
@@ -640,57 +639,73 @@
                 const seconds = String(now.getSeconds()).padStart(2, '0');
                 const timeString = `${hours}:${minutes}:${seconds}`;
                 
-                // Clear canvas
-                clockCtx.fillStyle = '#000';
-                clockCtx.fillRect(0, 0, 512, 256);
+                // Clear
+                clockCtx.fillStyle = 'rgba(0,0,0,0)';
+                clockCtx.fillRect(0, 0, 512, 512);
                 
-                // Draw time
-                clockCtx.font = 'bold 80px Courier';
-                clockCtx.fillStyle = '#0f0';
+                // Title
+                clockCtx.fillStyle = '#00ff00';
+                clockCtx.font = 'bold 40px Courier';
                 clockCtx.textAlign = 'center';
-                clockCtx.textBaseline = 'middle';
-                clockCtx.fillText(timeString, 256, 128);
+                clockCtx.fillText('SYSTEM TIME', 256, 80);
                 
-                // Add glow effect
-                clockCtx.shadowColor = '#0f0';
-                clockCtx.shadowBlur = 20;
-                clockCtx.fillText(timeString, 256, 128);
-                clockCtx.shadowBlur = 0;
+                // Time (large)
+                clockCtx.font = 'bold 80px Courier';
+                clockCtx.fillStyle = '#00ff00';
+                clockCtx.fillText(timeString, 256, 200);
                 
-                // Draw date (smaller)
+                // Date
                 const date = now.toLocaleDateString('ro-RO', { 
                     day: '2-digit', 
-                    month: '2-digit', 
+                    month: 'long', 
                     year: 'numeric' 
                 });
+                clockCtx.font = '28px Courier';
+                clockCtx.fillStyle = '#00ff00';
+                clockCtx.fillText(date, 256, 280);
+                
+                // Day of week
+                const dayNames = ['Duminică', 'Luni', 'Marți', 'Miercuri', 'Joi', 'Vineri', 'Sâmbătă'];
+                const dayName = dayNames[now.getDay()];
                 clockCtx.font = 'bold 32px Courier';
-                clockCtx.fillStyle = '#0ff';
-                clockCtx.fillText(date, 256, 200);
+                clockCtx.fillText(dayName, 256, 340);
+                
+                // Status indicator
+                clockCtx.font = '24px Courier';
+                clockCtx.fillStyle = '#0f0';
+                clockCtx.fillText('● ONLINE', 256, 400);
                 
                 clockTex.needsUpdate = true;
             }
             
-            const displayMesh = new THREE.Mesh(
-                new THREE.PlaneGeometry(0.75, 0.25),
+            const textMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.98, 0.58),
                 new THREE.MeshBasicMaterial({ 
-                    map: clockTex,
+                    map: clockTex, 
                     transparent: true,
-                    opacity: 1
+                    opacity: 0.9
                 })
             );
-            displayMesh.position.z = 0.026;
-            group.add(displayMesh);
+            textMesh.position.z = 0.001;
+            group.add(textMesh);
             
             // Store update function
             group.userData.updateClock = updateClock;
+            group.userData.floatSpeed = 0.15;
+            group.userData.floatOffset = Math.PI;
+            group.userData.initialY = 2.2;
+            group.userData.pulseSpeed = 0.5;
+            group.userData.isHologram = true;
+            group.userData.grabbable = true;
             updateClock();
             
-            // Position in space
-            group.position.set(0, 2, 0.8);
-            group.userData.grabbable = true;
+            // Position
+            group.position.set(2.8, 2.2, -2);
+            group.rotation.y = -Math.PI / 6;
             
             scene.add(group);
             clockMesh = group;
+            holograms.push(group);
         }
         
         function createAppLaunchers() {
