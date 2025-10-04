@@ -2156,6 +2156,10 @@
             holograms.forEach(holo => {
                 if (!holo.parent) return; // Skip if removed from scene
                 
+                // Skip animation if object is being grabbed
+                const isGrabbed = Object.values(grabbed).includes(holo);
+                if (isGrabbed) return;
+                
                 if (holo.userData.isHologram) {
                     // Gentle float
                     holo.position.y = holo.userData.initialY + 
