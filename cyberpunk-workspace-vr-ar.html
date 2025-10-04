@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyberpunk Workspace VR/AR - Quest 3</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Courier New', monospace; overflow: hidden; background: #000; }
+        #container { width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 20px; left: 20px; color: #0f0; z-index: 10; background: rgba(0,0,0,0.8); padding: 15px; border: 2px solid #0f0; font-size: 14px; }
+        #controls { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; gap: 15px; }
+        .btn { padding: 12px 24px; font-size: 16px; font-weight: bold; color: #0f0; background: rgba(0,20,0,0.9); border: 2px solid #0f0; cursor: pointer; transition: all 0.3s; text-transform: uppercase; font-family: 'Courier New', monospace; }
+        .btn:hover { background: #0f0; color: #000; box-shadow: 0 0 20px #0f0; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        #error { position: absolute; top: 100px; left: 20px; padding: 10px; background: rgba(139,0,0,0.9); color: #fff; border: 2px solid #f00; display: none; max-width: 400px; z-index: 10; }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="ui">
+        <div>🌐 Cyberpunk Workspace</div>
+        <div id="mode">Mode: Desktop</div>
+        <div id="status">Status: Ready</div>
+    </div>
+    <div id="controls">
+        <button class="btn" id="vrBtn">Enter VR</button>
+        <button class="btn" id="arBtn">Enter AR</button>
+    </div>
+    <div id="error"></div>
+
+    <script type="importmap">
+    { "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js" } }
+    </script>
+    
+    <script type="module">
+        import * as THREE from 'three';
+        
+        let scene, camera, renderer, room;
+        let controllers = [], raycasters = [];
+        let grabbed = {}, highlighted = [];
+        let currentMode = 'desktop';
+        let apps = { calc: null, editor: null };
+        let appButtons = [];
+        let calcHistory = [], editorHistory = [];
+        
+        const ui = document.getElementById('ui');
+        const modeDiv = document.getElementById('mode');
+        const statusDiv = document.getElementById('status');
+        const vrBtn = document.getElementById('vrBtn');
+        const arBtn = document.getElementById('arBtn');
+        const errorDiv = document.getElementById('error');
+        
+        // Check support
+        if ('xr' in navigator) {
+            navigator.xr.isSessionSupported('immersive-vr').then(s => { if (!s) vrBtn.disabled = true; });
+            navigator.xr.isSessionSupported('immersive-ar').then(s => { if (!s) arBtn.disabled = true; });
+        } else {
+            vrBtn.disabled = true;
+            arBtn.disabled = true;
+        }
+        
+        function showError(msg) {
+            errorDiv.textContent = msg;
+            errorDiv.style.display = 'block';
+            setTimeout(() => errorDiv.style.display = 'none', 5000);
+        }
+        
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.6, 2);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.xr.enabled = true;
+            document.getElementById('container').appendChild(renderer.domElement);
+            
+            createCyberpunkRoom();
+            createLighting();
+            createAppLaunchers();
+            setupControllers();
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+            
+            renderer.setAnimationLoop(animate);
+        }
+        
+        function createCyberpunkRoom() {
+            scene.background = new THREE.Color(0x0a0a1a);
+            
+            // Floor - Grid cyberpunk
+            const floorGeo = new THREE.PlaneGeometry(10, 10);
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#0a0a1a';
+            ctx.fillRect(0, 0, 512, 512);
+            ctx.strokeStyle = '#0f0';
+            ctx.lineWidth = 2;
+            for (let i = 0; i <= 10; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * 51.2, 0);
+                ctx.lineTo(i * 51.2, 512);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(0, i * 51.2);
+                ctx.lineTo(512, i * 51.2);
+                ctx.stroke();
+            }
+            const floorTex = new THREE.CanvasTexture(canvas);
+            floorTex.repeat.set(2, 2);
+            floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
+            const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, emissive: 0x001100, emissiveIntensity: 0.3 });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+            
+            // Walls - Cyberpunk panels
+            const wallMat = new THREE.MeshStandardMaterial({ color: 0x1a1a2a, emissive: 0x000510, emissiveIntensity: 0.5 });
+            
+            // Back wall
+            const backWall = new THREE.Mesh(new THREE.PlaneGeometry(10, 4), wallMat);
+            backWall.position.set(0, 2, -5);
+            scene.add(backWall);
+            
+            // Side walls
+            const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(10, 4), wallMat);
+            leftWall.position.set(-5, 2, 0);
+            leftWall.rotation.y = Math.PI / 2;
+            scene.add(leftWall);
+            
+            const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(10, 4), wallMat);
+            rightWall.position.set(5, 2, 0);
+            rightWall.rotation.y = -Math.PI / 2;
+            scene.add(rightWall);
+            
+            // Desk
+            const deskGeo = new THREE.BoxGeometry(2, 0.05, 1);
+            const deskMat = new THREE.MeshStandardMaterial({ color: 0x2a2a4a, metalness: 0.7, roughness: 0.3 });
+            const desk = new THREE.Mesh(deskGeo, deskMat);
+            desk.position.set(0, 0.75, -1.5);
+            scene.add(desk);
+            
+            // Neon strips
+            for (let i = 0; i < 5; i++) {
+                const neon = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.02, 3, 0.02),
+                    new THREE.MeshBasicMaterial({ color: i % 2 ? 0x0ff : 0xf0f })
+                );
+                neon.position.set(-4 + i * 2, 2, -4.9);
+                scene.add(neon);
+            }
+        }
+        
+        function createLighting() {
+            const ambient = new THREE.AmbientLight(0x404040, 1);
+            scene.add(ambient);
+            
+            const colors = [0x0ff, 0xf0f, 0x0f0, 0xff0];
+            colors.forEach((col, i) => {
+                const light = new THREE.PointLight(col, 2, 10);
+                const angle = (i / colors.length) * Math.PI * 2;
+                light.position.set(Math.cos(angle) * 3, 2.5, Math.sin(angle) * 3);
+                scene.add(light);
+            });
+        }
+        
+        function createAppLaunchers() {
+            const btnData = [
+                { name: 'Calculator', icon: '🔢', pos: [-0.6, 1.6, 0], color: 0x00ff00 },
+                { name: 'Editor', icon: '📝', pos: [0.6, 1.6, 0], color: 0x00ffff }
+            ];
+            
+            btnData.forEach(data => {
+                const group = new THREE.Group();
+                
+                // Button base
+                const btnGeo = new THREE.BoxGeometry(0.4, 0.4, 0.1);
+                const btnMat = new THREE.MeshStandardMaterial({ 
+                    color: data.color, 
+                    emissive: data.color, 
+                    emissiveIntensity: 0.5,
+                    metalness: 0.8,
+                    roughness: 0.2
+                });
+                const btn = new THREE.Mesh(btnGeo, btnMat);
+                group.add(btn);
+                
+                // Icon
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 256;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 120px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(data.icon, 128, 128);
+                
+                const iconTex = new THREE.CanvasTexture(canvas);
+                const iconMat = new THREE.MeshBasicMaterial({ map: iconTex, transparent: true });
+                const icon = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.3), iconMat);
+                icon.position.z = 0.051;
+                group.add(icon);
+                
+                group.position.set(...data.pos);
+                group.userData = { 
+                    type: 'launcher', 
+                    app: data.name.toLowerCase(),
+                    grabbable: true,
+                    originalColor: data.color
+                };
+                
+                scene.add(group);
+                appButtons.push(group);
+            });
+        }
+        
+        function createCalculator(pos) {
+            if (apps.calc) {
+                scene.remove(apps.calc);
+            }
+            
+            const group = new THREE.Group();
+            let display = '0';
+            let memory = 0;
+            let operator = null;
+            let newNumber = true;
+            
+            // Calc body
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(0.6, 0.8, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x1a1a2a, metalness: 0.7, roughness: 0.3 })
+            );
+            group.add(body);
+            
+            // Display
+            const dispCanvas = document.createElement('canvas');
+            dispCanvas.width = 512; dispCanvas.height = 128;
+            const dispCtx = dispCanvas.getContext('2d');
+            function updateDisplay() {
+                dispCtx.fillStyle = '#0a0a1a';
+                dispCtx.fillRect(0, 0, 512, 128);
+                dispCtx.fillStyle = '#0f0';
+                dispCtx.font = 'bold 48px Courier';
+                dispCtx.textAlign = 'right';
+                dispCtx.textBaseline = 'middle';
+                dispCtx.fillText(display.slice(-12), 500, 64);
+                dispTex.needsUpdate = true;
+            }
+            const dispTex = new THREE.CanvasTexture(dispCanvas);
+            const dispMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.55, 0.15),
+                new THREE.MeshBasicMaterial({ map: dispTex })
+            );
+            dispMesh.position.set(0, 0.3, 0.026);
+            group.add(dispMesh);
+            updateDisplay();
+            
+            // Buttons
+            const btnLayout = [
+                ['C', '√', '%', '/'],
+                ['7', '8', '9', '*'],
+                ['4', '5', '6', '-'],
+                ['1', '2', '3', '+'],
+                ['0', '.', 'log', '=']
+            ];
+            
+            const btnSize = 0.1;
+            const spacing = 0.12;
+            const startY = 0.1;
+            
+            btnLayout.forEach((row, r) => {
+                row.forEach((label, c) => {
+                    const btnGeo = new THREE.BoxGeometry(btnSize, btnSize, 0.02);
+                    const btnMat = new THREE.MeshStandardMaterial({ 
+                        color: label === '=' ? 0x00ff00 : 0x2a2a4a,
+                        emissive: label === '=' ? 0x00ff00 : 0x0a0a1a,
+                        emissiveIntensity: 0.3
+                    });
+                    const btn = new THREE.Mesh(btnGeo, btnMat);
+                    
+                    const x = -0.18 + c * spacing;
+                    const y = startY - r * spacing;
+                    btn.position.set(x, y, 0.036);
+                    
+                    // Label
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 128; canvas.height = 128;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 60px Courier';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(label, 64, 64);
+                    
+                    const labelTex = new THREE.CanvasTexture(canvas);
+                    const labelMesh = new THREE.Mesh(
+                        new THREE.PlaneGeometry(btnSize * 0.8, btnSize * 0.8),
+                        new THREE.MeshBasicMaterial({ map: labelTex, transparent: true })
+                    );
+                    labelMesh.position.z = 0.011;
+                    btn.add(labelMesh);
+                    
+                    btn.userData = { 
+                        type: 'calcBtn', 
+                        label: label,
+                        onClick: () => handleCalcInput(label)
+                    };
+                    
+                    group.add(btn);
+                });
+            });
+            
+            function handleCalcInput(input) {
+                if (input >= '0' && input <= '9') {
+                    if (newNumber) {
+                        display = input;
+                        newNumber = false;
+                    } else {
+                        display = display === '0' ? input : display + input;
+                    }
+                } else if (input === '.') {
+                    if (!display.includes('.')) display += '.';
+                } else if (input === 'C') {
+                    display = '0';
+                    memory = 0;
+                    operator = null;
+                    newNumber = true;
+                } else if (input === '√') {
+                    display = String(Math.sqrt(parseFloat(display)));
+                    newNumber = true;
+                } else if (input === 'log') {
+                    display = String(Math.log10(parseFloat(display)));
+                    newNumber = true;
+                } else if (input === '%') {
+                    display = String(parseFloat(display) / 100);
+                    newNumber = true;
+                } else if (['+', '-', '*', '/'].includes(input)) {
+                    if (operator && !newNumber) {
+                        const result = calculate(memory, parseFloat(display), operator);
+                        display = String(result);
+                        memory = result;
+                    } else {
+                        memory = parseFloat(display);
+                    }
+                    operator = input;
+                    newNumber = true;
+                } else if (input === '=') {
+                    if (operator) {
+                        const result = calculate(memory, parseFloat(display), operator);
+                        display = String(result);
+                        calcHistory.push(`${memory} ${operator} ${parseFloat(display)} = ${result}`);
+                        memory = 0;
+                        operator = null;
+                        newNumber = true;
+                    }
+                }
+                updateDisplay();
+            }
+            
+            function calculate(a, b, op) {
+                switch(op) {
+                    case '+': return a + b;
+                    case '-': return a - b;
+                    case '*': return a * b;
+                    case '/': return b !== 0 ? a / b : 0;
+                    default: return b;
+                }
+            }
+            
+            // Close button
+            const closeBtn = new THREE.Mesh(
+                new THREE.CircleGeometry(0.05, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff0000 })
+            );
+            closeBtn.position.set(0.25, 0.35, 0.026);
+            closeBtn.userData = { 
+                type: 'closeBtn',
+                onClick: () => {
+                    scene.remove(apps.calc);
+                    apps.calc = null;
+                }
+            };
+            group.add(closeBtn);
+            
+            // Download history button
+            const dlBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.08, 0.02),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff, emissive: 0x0000ff, emissiveIntensity: 0.3 })
+            );
+            dlBtn.position.set(0, -0.45, 0.026);
+            dlBtn.userData = {
+                type: 'downloadBtn',
+                onClick: () => downloadHistory('calculator')
+            };
+            group.add(dlBtn);
+            
+            group.position.set(...pos);
+            group.userData = { type: 'app', grabbable: true };
+            scene.add(group);
+            apps.calc = group;
+        }
+        
+        function createEditor(pos) {
+            if (apps.editor) {
+                scene.remove(apps.editor);
+            }
+            
+            const group = new THREE.Group();
+            let text = '';
+            let cursorPos = 0;
+            let fontSize = 24;
+            let textColor = '#ffffff';
+            let bold = false;
+            let italic = false;
+            
+            // Editor body
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(1.2, 0.8, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x1a1a2a, metalness: 0.7, roughness: 0.3 })
+            );
+            group.add(body);
+            
+            // Text display
+            const textCanvas = document.createElement('canvas');
+            textCanvas.width = 1024; textCanvas.height = 512;
+            const textCtx = textCanvas.getContext('2d');
+            function updateTextDisplay() {
+                textCtx.fillStyle = '#1a1a2a';
+                textCtx.fillRect(0, 0, 1024, 512);
+                textCtx.fillStyle = textColor;
+                textCtx.font = `${bold ? 'bold' : ''} ${italic ? 'italic' : ''} ${fontSize}px Courier`;
+                textCtx.textAlign = 'left';
+                textCtx.textBaseline = 'top';
+                
+                const lines = text.split('\n');
+                lines.forEach((line, i) => {
+                    textCtx.fillText(line, 10, 10 + i * (fontSize + 5));
+                });
+                
+                textTex.needsUpdate = true;
+            }
+            const textTex = new THREE.CanvasTexture(textCanvas);
+            const textMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.1, 0.55),
+                new THREE.MeshBasicMaterial({ map: textTex })
+            );
+            textMesh.position.set(0, 0.1, 0.026);
+            group.add(textMesh);
+            updateTextDisplay();
+            
+            // Virtual keyboard
+            const keyboard = createVirtualKeyboard();
+            keyboard.position.set(0, -0.5, 0.026);
+            keyboard.scale.set(0.8, 0.8, 0.8);
+            group.add(keyboard);
+            
+            function createVirtualKeyboard() {
+                const kbGroup = new THREE.Group();
+                const keys = [
+                    ['1','2','3','4','5','6','7','8','9','0'],
+                    ['Q','W','E','R','T','Y','U','I','O','P'],
+                    ['A','S','D','F','G','H','J','K','L'],
+                    ['Z','X','C','V','B','N','M','⌫']
+                ];
+                
+                const keySize = 0.06;
+                const spacing = 0.065;
+                
+                keys.forEach((row, r) => {
+                    row.forEach((key, c) => {
+                        const keyMesh = new THREE.Mesh(
+                            new THREE.BoxGeometry(keySize, keySize, 0.02),
+                            new THREE.MeshStandardMaterial({ color: 0x2a2a4a, emissive: 0x0a0a1a, emissiveIntensity: 0.3 })
+                        );
+                        
+                        const x = -0.3 + c * spacing;
+                        const y = -r * spacing;
+                        keyMesh.position.set(x, y, 0);
+                        
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 64; canvas.height = 64;
+                        const ctx = canvas.getContext('2d');
+                        ctx.fillStyle = '#fff';
+                        ctx.font = 'bold 32px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(key, 32, 32);
+                        
+                        const labelTex = new THREE.CanvasTexture(canvas);
+                        const label = new THREE.Mesh(
+                            new THREE.PlaneGeometry(keySize * 0.7, keySize * 0.7),
+                            new THREE.MeshBasicMaterial({ map: labelTex, transparent: true })
+                        );
+                        label.position.z = 0.011;
+                        keyMesh.add(label);
+                        
+                        keyMesh.userData = {
+                            type: 'keyBtn',
+                            key: key,
+                            onClick: () => handleKeyPress(key)
+                        };
+                        
+                        kbGroup.add(keyMesh);
+                    });
+                });
+                
+                // Space bar
+                const spaceBar = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.3, keySize, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x2a2a4a })
+                );
+                spaceBar.position.set(0, -keys.length * spacing, 0);
+                spaceBar.userData = {
+                    type: 'keyBtn',
+                    key: ' ',
+                    onClick: () => handleKeyPress(' ')
+                };
+                kbGroup.add(spaceBar);
+                
+                // Enter
+                const enterKey = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.12, keySize, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x00ff00 })
+                );
+                enterKey.position.set(0.35, -keys.length * spacing, 0);
+                enterKey.userData = {
+                    type: 'keyBtn',
+                    key: '\n',
+                    onClick: () => handleKeyPress('\n')
+                };
+                kbGroup.add(enterKey);
+                
+                return kbGroup;
+            }
+            
+            function handleKeyPress(key) {
+                if (key === '⌫') {
+                    text = text.slice(0, -1);
+                } else {
+                    text += key;
+                    editorHistory.push(text);
+                }
+                updateTextDisplay();
+            }
+            
+            // Close button
+            const closeBtn = new THREE.Mesh(
+                new THREE.CircleGeometry(0.05, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff0000 })
+            );
+            closeBtn.position.set(0.55, 0.35, 0.026);
+            closeBtn.userData = {
+                type: 'closeBtn',
+                onClick: () => {
+                    scene.remove(apps.editor);
+                    apps.editor = null;
+                }
+            };
+            group.add(closeBtn);
+            
+            // Download button
+            const dlBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.08, 0.02),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff })
+            );
+            dlBtn.position.set(-0.5, 0.35, 0.026);
+            dlBtn.userData = {
+                type: 'downloadBtn',
+                onClick: () => downloadHistory('editor')
+            };
+            group.add(dlBtn);
+            
+            group.position.set(0, 1.6, -1);
+            group.userData = { type: 'app', grabbable: true };
+            scene.add(group);
+            apps.editor = group;
+        }
+        
+        function downloadHistory(type) {
+            const content = type === 'calculator' ? calcHistory.join('\n') : editorHistory[editorHistory.length - 1] || '';
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${type}_log.txt`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+        
+        function setupControllers() {
+            for (let i = 0; i < 2; i++) {
+                const controller = renderer.xr.getController(i);
+                controller.userData.index = i;
+                scene.add(controller);
+                
+                const line = new THREE.Line(
+                    new THREE.BufferGeometry().setFromPoints([
+                        new THREE.Vector3(0, 0, 0),
+                        new THREE.Vector3(0, 0, -1)
+                    ])
+                );
+                line.scale.z = 5;
+                line.material.color.setHex(i === 0 ? 0xff0066 : 0x0066ff);
+                controller.add(line);
+                
+                const grip = renderer.xr.getControllerGrip(i);
+                const gripMesh = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.02, 0.03, 0.1, 8),
+                    new THREE.MeshStandardMaterial({ color: i === 0 ? 0xff0066 : 0x0066ff })
+                );
+                gripMesh.rotation.x = Math.PI / 2;
+                grip.add(gripMesh);
+                scene.add(grip);
+                
+                controllers.push(controller);
+                raycasters.push(new THREE.Raycaster());
+                
+                controller.addEventListener('selectstart', () => onSelectStart(i));
+                controller.addEventListener('selectend', () => onSelectEnd(i));
+            }
+        }
+        
+        function onSelectStart(i) {
+            const tempMatrix = new THREE.Matrix4();
+            const controller = controllers[i];
+            const raycaster = raycasters[i];
+            
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            
+            const allObjects = [...appButtons];
+            if (apps.calc) allObjects.push(...apps.calc.children.filter(c => c.userData.type));
+            if (apps.editor) allObjects.push(...apps.editor.children.filter(c => c.userData.type));
+            if (apps.calc && apps.calc.userData.grabbable) allObjects.push(apps.calc);
+            if (apps.editor && apps.editor.userData.grabbable) allObjects.push(apps.editor);
+            
+            const intersects = raycaster.intersectObjects(allObjects, true);
+            
+            if (intersects.length > 0) {
+                let obj = intersects[0].object;
+                while (obj.parent && !obj.userData.type) obj = obj.parent;
+                
+                if (obj.userData.onClick) {
+                    obj.userData.onClick();
+                } else if (obj.userData.type === 'launcher') {
+                    const app = obj.userData.app;
+                    if (app === 'calculator') createCalculator([0, 1.6, -1]);
+                    else if (app === 'editor') createEditor([0, 1.6, -1]);
+                } else if (obj.userData.grabbable) {
+                    grabbed[i] = obj;
+                    controller.attach(obj);
+                }
+            }
+        }
+        
+        function onSelectEnd(i) {
+            const obj = grabbed[i];
+            if (obj) {
+                scene.attach(obj);
+                delete grabbed[i];
+            }
+        }
+        
+        async function switchMode(mode) {
+            try {
+                const currentSession = renderer.xr.getSession();
+                if (currentSession) await currentSession.end();
+                
+                await new Promise(r => setTimeout(r, 100));
+                
+                if (mode === 'vr') {
+                    scene.background = new THREE.Color(0x0a0a1a);
+                    const session = await navigator.xr.requestSession('immersive-vr', {
+                        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+                    });
+                    await renderer.xr.setSession(session);
+                    currentMode = 'vr';
+                    modeDiv.textContent = 'Mode: VR';
+                    ui.style.display = 'none';
+                    document.getElementById('controls').style.display = 'none';
+                } else if (mode === 'ar') {
+                    scene.background = null;
+                    const session = await navigator.xr.requestSession('immersive-ar', {
+                        requiredFeatures: ['local-floor'],
+                        optionalFeatures: ['hand-tracking']
+                    });
+                    await renderer.xr.setSession(session);
+                    currentMode = 'ar';
+                    modeDiv.textContent = 'Mode: AR';
+                    ui.style.display = 'none';
+                    document.getElementById('controls').style.display = 'none';
+                }
+            } catch (err) {
+                showError('Error: ' + err.message);
+            }
+        }
+        
+        vrBtn.addEventListener('click', () => switchMode('vr'));
+        arBtn.addEventListener('click', () => switchMode('ar'));
+        
+        function animate() {
+            renderer.render(scene, camera);
+        }
+        
+        init();
+    </script>
+</body>
+</html>
