@@ -28,6 +28,17 @@
         <button class="btn" id="arBtn">Enter AR</button>
     </div>
     <div id="error"></div>
+    
+    <!-- Water distortion overlay -->
+    <div id="waterEffect" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: radial-gradient(circle, rgba(0,255,0,0.3), rgba(0,255,0,0.6)); backdrop-filter: blur(10px); z-index: 100; pointer-events: none; animation: waterWave 0.5s ease-in-out;"></div>
+    
+    <style>
+        @keyframes waterWave {
+            0% { opacity: 0; transform: scale(1); filter: blur(0px); }
+            50% { opacity: 1; transform: scale(1.05); filter: blur(15px); }
+            100% { opacity: 0; transform: scale(1); filter: blur(0px); }
+        }
+    </style>
 
     <script type="importmap">
     { "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js" } }
@@ -46,6 +57,11 @@
         let floatingObjects = [];
         let holograms = [];
         let time = 0;
+        let clockMesh = null;
+        let lastClockUpdate = 0;
+        let isTransitioning = false;
+        let transitionProgress = 0;
+        let transitionDirection = { x: 0, z: 0 };
         
         const ui = document.getElementById('ui');
         const modeDiv = document.getElementById('mode');
@@ -87,6 +103,7 @@
             createLighting();
             createFloatingObjects();
             createHolograms();
+            createDigitalClock();
             createAppLaunchers();
             setupControllers();
             
@@ -436,7 +453,8 @@
                     rotationSpeed: 0.003 + Math.random() * 0.005,
                     floatSpeed: 0.3 + Math.random() * 0.3,
                     floatOffset: Math.random() * Math.PI * 2,
-                    floatAmplitude: 0.2
+                    floatAmplitude: 0.2,
+                    grabbable: true
                 };
                 
                 scene.add(mesh);
@@ -586,11 +604,101 @@
             return group;
         }
         
+        function createDigitalClock() {
+            const group = new THREE.Group();
+            
+            // Clock body
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(0.8, 0.3, 0.05),
+                new THREE.MeshStandardMaterial({ 
+                    color: 0x0a0a1a, 
+                    metalness: 0.9, 
+                    roughness: 0.2,
+                    emissive: 0x001100,
+                    emissiveIntensity: 0.3
+                })
+            );
+            group.add(body);
+            
+            // Neon border
+            const borderGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.8, 0.3, 0.05));
+            const borderMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+            const border = new THREE.LineSegments(borderGeo, borderMat);
+            group.add(border);
+            
+            // Time display
+            const clockCanvas = document.createElement('canvas');
+            clockCanvas.width = 512;
+            clockCanvas.height = 256;
+            const clockCtx = clockCanvas.getContext('2d');
+            const clockTex = new THREE.CanvasTexture(clockCanvas);
+            
+            function updateClock() {
+                const now = new Date();
+                const hours = String(now.getHours()).padStart(2, '0');
+                const minutes = String(now.getMinutes()).padStart(2, '0');
+                const seconds = String(now.getSeconds()).padStart(2, '0');
+                const timeString = `${hours}:${minutes}:${seconds}`;
+                
+                // Clear canvas
+                clockCtx.fillStyle = '#000';
+                clockCtx.fillRect(0, 0, 512, 256);
+                
+                // Draw time
+                clockCtx.font = 'bold 80px Courier';
+                clockCtx.fillStyle = '#0f0';
+                clockCtx.textAlign = 'center';
+                clockCtx.textBaseline = 'middle';
+                clockCtx.fillText(timeString, 256, 128);
+                
+                // Add glow effect
+                clockCtx.shadowColor = '#0f0';
+                clockCtx.shadowBlur = 20;
+                clockCtx.fillText(timeString, 256, 128);
+                clockCtx.shadowBlur = 0;
+                
+                // Draw date (smaller)
+                const date = now.toLocaleDateString('ro-RO', { 
+                    day: '2-digit', 
+                    month: '2-digit', 
+                    year: 'numeric' 
+                });
+                clockCtx.font = 'bold 32px Courier';
+                clockCtx.fillStyle = '#0ff';
+                clockCtx.fillText(date, 256, 200);
+                
+                clockTex.needsUpdate = true;
+            }
+            
+            const displayMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.75, 0.25),
+                new THREE.MeshBasicMaterial({ 
+                    map: clockTex,
+                    transparent: true,
+                    opacity: 1
+                })
+            );
+            displayMesh.position.z = 0.026;
+            group.add(displayMesh);
+            
+            // Store update function
+            group.userData.updateClock = updateClock;
+            updateClock();
+            
+            // Position in space
+            group.position.set(0, 2, 0.8);
+            group.userData.grabbable = true;
+            
+            scene.add(group);
+            clockMesh = group;
+        }
+        
         function createAppLaunchers() {
             const btnData = [
-                { name: 'Calculator', icon: '🔢', pos: [-0.8, 1.3, 0.8], color: 0x00ff00 },
-                { name: 'Editor', icon: '📝', pos: [0, 1.3, 0.8], color: 0x00ffff },
-                { name: 'Blackjack', icon: '🃏', pos: [0.8, 1.3, 0.8], color: 0xff0066 }
+                { name: 'Calculator', icon: '🔢', pos: [-1.2, 1.3, 0.8], color: 0x00ff00 },
+                { name: 'Editor', icon: '📝', pos: [-0.4, 1.3, 0.8], color: 0x00ffff },
+                { name: 'Blackjack', icon: '🃏', pos: [0.4, 1.3, 0.8], color: 0xff0066 },
+                { name: 'Exit', icon: '❌', pos: [1.2, 1.3, 0.8], color: 0xff0000 }
             ];
             
             btnData.forEach(data => {
@@ -1516,6 +1624,65 @@
             };
             group.add(deckPlusBtn);
             
+            // Download history button
+            const dlBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.12, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff, emissive: 0x0000ff, emissiveIntensity: 0.3 })
+            );
+            dlBtn.position.set(0.6, -0.55, 0.036);
+            
+            const dlCanvas = document.createElement('canvas');
+            dlCanvas.width = 256; dlCanvas.height = 128;
+            const dlCtx = dlCanvas.getContext('2d');
+            dlCtx.fillStyle = '#fff';
+            dlCtx.font = 'bold 40px Arial';
+            dlCtx.textAlign = 'center';
+            dlCtx.fillText('📥 LOG', 128, 75);
+            
+            const dlLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.23, 0.1),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(dlCanvas), transparent: true })
+            );
+            dlLabel.position.z = 0.016;
+            dlBtn.add(dlLabel);
+            
+            dlBtn.userData = {
+                type: 'downloadBtn',
+                onClick: () => {
+                    let content = '=== BLACKJACK COUNTER LOG ===\n\n';
+                    content += `Total Decks: ${totalDecks}\n`;
+                    content += `Cards Played: ${cardsPlayed}\n`;
+                    content += `Remaining Decks: ${getRemainingDecks().toFixed(2)}\n\n`;
+                    content += `Running Count Hi-Lo: ${runningCountHiLo > 0 ? '+' : ''}${runningCountHiLo}\n`;
+                    content += `Running Count Wong: ${runningCountWong > 0 ? '+' : ''}${runningCountWong.toFixed(1)}\n\n`;
+                    content += `True Count Hi-Lo: ${getTrueCountHiLo() > 0 ? '+' : ''}${getTrueCountHiLo().toFixed(2)}\n`;
+                    content += `True Count Wong: ${getTrueCountWong() > 0 ? '+' : ''}${getTrueCountWong().toFixed(2)}\n\n`;
+                    content += '=== CARD HISTORY ===\n';
+                    history.forEach((entry, i) => {
+                        content += `${i + 1}. ${entry.card} | Hi-Lo: ${entry.vHiLo > 0 ? '+' : ''}${entry.vHiLo} | Wong: ${entry.vWong > 0 ? '+' : ''}${entry.vWong.toFixed(1)}\n`;
+                    });
+                    content += '\n=== CARD COUNTS ===\n';
+                    allCards.forEach(card => {
+                        if (cardCounts[card] > 0) {
+                            content += `${card}: ${cardCounts[card]} cards\n`;
+                        }
+                    });
+                    
+                    try {
+                        const blob = new Blob([content], { type: 'text/plain' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `blackjack_log_${Date.now()}.txt`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                    } catch (err) {
+                        console.error('Download error:', err);
+                    }
+                }
+            };
+            group.add(dlBtn);
+            
             // History display
             const historyCanvas = document.createElement('canvas');
             historyCanvas.width = 1024; historyCanvas.height = 256;
@@ -1693,7 +1860,7 @@
                 allObjects.push(...editorButtons);
             }
             if (apps.blackjack && apps.blackjack.parent) {
-                const bjButtons = apps.blackjack.children.filter(c => c.userData && (c.userData.type === 'bjCard' || c.userData.type === 'undoBtn' || c.userData.type === 'resetBtn' || c.userData.type === 'deckMinus' || c.userData.type === 'deckPlus' || c.userData.type === 'closeBtn'));
+                const bjButtons = apps.blackjack.children.filter(c => c.userData && (c.userData.type === 'bjCard' || c.userData.type === 'undoBtn' || c.userData.type === 'resetBtn' || c.userData.type === 'deckMinus' || c.userData.type === 'deckPlus' || c.userData.type === 'downloadBtn' || c.userData.type === 'closeBtn'));
                 allObjects.push(...bjButtons);
             }
             
@@ -1713,7 +1880,22 @@
                     if (app === 'calculator') createCalculator([0, 1.3, 0.5]);
                     else if (app === 'editor') createEditor([0, 1.3, 0.5]);
                     else if (app === 'blackjack') createBlackjack([0, 1.3, 0.5]);
+                    else if (app === 'exit') exitXR();
                 }
+            }
+        }
+        
+        async function exitXR() {
+            try {
+                const session = renderer.xr.getSession();
+                if (session) {
+                    await session.end();
+                    ui.style.display = 'block';
+                    document.getElementById('controls').style.display = 'flex';
+                    modeDiv.textContent = 'Mode: Desktop';
+                }
+            } catch (err) {
+                console.error('Exit XR error:', err);
             }
         }
         
@@ -1728,7 +1910,10 @@
             raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
             raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
             
-            const grabbableObjects = [...appButtons];
+            const grabbableObjects = [...appButtons, ...floatingObjects];
+            if (clockMesh && clockMesh.parent && clockMesh.userData.grabbable) {
+                grabbableObjects.push(clockMesh);
+            }
             if (apps.calc && apps.calc.parent && apps.calc.userData.grabbable) {
                 grabbableObjects.push(apps.calc);
             }
@@ -1767,6 +1952,36 @@
             const session = renderer.xr.getSession();
             if (!session || !session.inputSources) return;
             
+            // Handle automatic transition through walls
+            if (isTransitioning) {
+                transitionProgress += 0.02; // Smooth transition speed
+                
+                // Continue moving in transition direction
+                dolly.position.x += transitionDirection.x * 0.08;
+                dolly.position.z += transitionDirection.z * 0.08;
+                
+                // Check if we've completed the transition (crossed to other side)
+                const margin = 0.5;
+                const maxBound = 5 - margin;
+                const minBound = -5 + margin;
+                
+                let crossedToOtherSide = false;
+                
+                // Check if we're now safely on the other side
+                if (transitionDirection.x > 0 && dolly.position.x > minBound + 1) crossedToOtherSide = true;
+                if (transitionDirection.x < 0 && dolly.position.x < maxBound - 1) crossedToOtherSide = true;
+                if (transitionDirection.z > 0 && dolly.position.z > minBound + 1) crossedToOtherSide = true;
+                if (transitionDirection.z < 0 && dolly.position.z < maxBound - 1) crossedToOtherSide = true;
+                
+                if (crossedToOtherSide || transitionProgress > 1) {
+                    isTransitioning = false;
+                    transitionProgress = 0;
+                    transitionDirection = { x: 0, z: 0 };
+                }
+                
+                return; // Don't process joystick input during transition
+            }
+            
             for (let i = 0; i < session.inputSources.length; i++) {
                 const inputSource = session.inputSources[i];
                 if (!inputSource || !inputSource.gamepad) continue;
@@ -1782,8 +1997,61 @@
                         if (Math.abs(x) > 0.1 || Math.abs(y) > 0.1) {
                             const speed = 0.05;
                             const angle = dolly.rotation.y;
-                            dolly.position.x += (x * Math.cos(angle) - y * Math.sin(angle)) * speed;
-                            dolly.position.z += (x * Math.sin(angle) + y * Math.cos(angle)) * speed;
+                            const newX = dolly.position.x + (x * Math.cos(angle) - y * Math.sin(angle)) * speed;
+                            const newZ = dolly.position.z + (x * Math.sin(angle) + y * Math.cos(angle)) * speed;
+                            
+                            // Infinite loop boundaries
+                            const margin = 0.5;
+                            const maxBound = 5 - margin;
+                            const minBound = -5 + margin;
+                            
+                            // Check if we're hitting a boundary
+                            let hitBoundary = false;
+                            let moveDir = { x: 0, z: 0 };
+                            
+                            if (newX > maxBound) {
+                                hitBoundary = true;
+                                moveDir.x = 1;
+                                dolly.position.x = minBound; // Teleport to opposite side
+                            } else if (newX < minBound) {
+                                hitBoundary = true;
+                                moveDir.x = -1;
+                                dolly.position.x = maxBound; // Teleport to opposite side
+                            } else {
+                                dolly.position.x = newX;
+                            }
+                            
+                            if (newZ > maxBound) {
+                                hitBoundary = true;
+                                moveDir.z = 1;
+                                dolly.position.z = minBound; // Teleport to opposite side
+                            } else if (newZ < minBound) {
+                                hitBoundary = true;
+                                moveDir.z = -1;
+                                dolly.position.z = maxBound; // Teleport to opposite side
+                            } else {
+                                dolly.position.z = newZ;
+                            }
+                            
+                            // Start transition effect when hitting boundary
+                            if (hitBoundary) {
+                                isTransitioning = true;
+                                transitionProgress = 0;
+                                transitionDirection = moveDir;
+                                
+                                // Trigger water effect
+                                const waterEffect = document.getElementById('waterEffect');
+                                if (waterEffect) {
+                                    waterEffect.style.display = 'block';
+                                    waterEffect.style.animation = 'none';
+                                    setTimeout(() => {
+                                        waterEffect.style.animation = 'waterWave 0.5s ease-in-out';
+                                    }, 10);
+                                    setTimeout(() => {
+                                        waterEffect.style.display = 'none';
+                                    }, 500);
+                                }
+                            }
                         }
                     } else if (inputSource.handedness === 'left') {
                         // Left stick - rotation
@@ -1841,15 +2109,22 @@
             
             updateLocomotion();
             
-            // Animate floating objects (slow and smooth)
+            // Update clock once per second
+            const currentTime = Date.now();
+            if (clockMesh && clockMesh.userData.updateClock && currentTime - lastClockUpdate > 100) {
+                clockMesh.userData.updateClock();
+                lastClockUpdate = currentTime;
+            }
+            
+            // Animate floating objects (VERY slow and smooth)
             floatingObjects.forEach(obj => {
                 if (!obj.parent) return; // Skip if removed from scene
                 
                 const isGrabbed = Object.values(grabbed).includes(obj);
                 if (!isGrabbed) {
-                    // Smooth rotation
-                    obj.rotation.x += obj.userData.rotationSpeed;
-                    obj.rotation.y += obj.userData.rotationSpeed * 1.3;
+                    // VERY Smooth rotation (slow motion effect)
+                    obj.rotation.x += obj.userData.rotationSpeed * 0.3;
+                    obj.rotation.y += obj.userData.rotationSpeed * 1.3 * 0.3;
                     
                     // Smooth floating
                     obj.position.y = obj.userData.initialY + 
@@ -1893,18 +2168,18 @@
                 }
             });
             
-            // Animate digital rain particles (slower)
+            // Animate digital rain particles (MUCH slower - slow motion effect)
             scene.children.forEach(child => {
                 if (child.userData.isParticles) {
                     const positions = child.geometry.attributes.position.array;
                     for (let i = 0; i < positions.length; i += 3) {
-                        positions[i + 1] -= 0.005; // Much slower fall
+                        positions[i + 1] -= 0.002; // MUCH slower fall (slow motion)
                         if (positions[i + 1] < 0) {
                             positions[i + 1] = 5; // Reset to top
                         }
                     }
                     child.geometry.attributes.position.needsUpdate = true;
-                    child.rotation.y += 0.0002; // Slower rotation
+                    child.rotation.y += 0.0001; // Slower rotation
                 }
             });
             
