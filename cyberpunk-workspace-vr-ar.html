@@ -39,7 +39,7 @@
         let scene, camera, renderer;
         let controllers = [], grips = [], raycasters = [];
         let grabbed = {};
-        let apps = { calc: null, editor: null };
+        let apps = { calc: null, editor: null, blackjack: null };
         let appButtons = [];
         let calcHistory = [], editorHistory = [];
         let dolly;
@@ -90,11 +90,23 @@
             createAppLaunchers();
             setupControllers();
             
-            window.addEventListener('resize', () => {
+            const handleResize = () => {
+                if (!camera || !renderer) return;
                 camera.aspect = window.innerWidth / window.innerHeight;
                 camera.updateProjectionMatrix();
                 renderer.setSize(window.innerWidth, window.innerHeight);
-            });
+            };
+            
+            window.addEventListener('resize', handleResize);
+            
+            // Store cleanup function
+            window.webxrCleanup = () => {
+                window.removeEventListener('resize', handleResize);
+                if (renderer) {
+                    renderer.setAnimationLoop(null);
+                    renderer.dispose();
+                }
+            };
             
             renderer.setAnimationLoop(animate);
         }
@@ -576,8 +588,9 @@
         
         function createAppLaunchers() {
             const btnData = [
-                { name: 'Calculator', icon: '🔢', pos: [-0.5, 1.3, 0.8], color: 0x00ff00 },
-                { name: 'Editor', icon: '📝', pos: [0.5, 1.3, 0.8], color: 0x00ffff }
+                { name: 'Calculator', icon: '🔢', pos: [-0.8, 1.3, 0.8], color: 0x00ff00 },
+                { name: 'Editor', icon: '📝', pos: [0, 1.3, 0.8], color: 0x00ffff },
+                { name: 'Blackjack', icon: '🃏', pos: [0.8, 1.3, 0.8], color: 0xff0066 }
             ];
             
             btnData.forEach(data => {
@@ -979,7 +992,11 @@
                     type: 'keyBtn', 
                     onClick: () => {
                         shiftActive = !shiftActive;
-                        Object.values(keyMeshes).forEach(k => k.userData.updateLabel && k.userData.updateLabel());
+                        Object.values(keyMeshes).forEach(k => {
+                            if (k.userData && k.userData.updateLabel) {
+                                k.userData.updateLabel();
+                            }
+                        });
                     }
                 };
                 kbGroup.add(shiftKey);
@@ -996,7 +1013,11 @@
                     onClick: () => {
                         capsLock = !capsLock;
                         capsKey.material.color.setHex(capsLock ? 0x00ff00 : 0x4a4a6a);
-                        Object.values(keyMeshes).forEach(k => k.userData.updateLabel && k.userData.updateLabel());
+                        Object.values(keyMeshes).forEach(k => {
+                            if (k.userData && k.userData.updateLabel) {
+                                k.userData.updateLabel();
+                            }
+                        });
                     }
                 };
                 kbGroup.add(capsKey);
@@ -1058,8 +1079,10 @@
                     cursorPos++;
                     if (shiftActive) {
                         shiftActive = false;
-                        Object.values(keyboard.children).forEach(k => {
-                            if (k.userData.updateLabel) k.userData.updateLabel();
+                        keyboard.children.forEach(k => {
+                            if (k.userData && k.userData.updateLabel) {
+                                k.userData.updateLabel();
+                            }
                         });
                     }
                 }
@@ -1135,15 +1158,483 @@
             apps.editor = group;
         }
         
+        function createBlackjack(pos) {
+            if (apps.blackjack) {
+                apps.blackjack.traverse(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (child.material.map) child.material.map.dispose();
+                        child.material.dispose();
+                    }
+                });
+                scene.remove(apps.blackjack);
+            }
+            
+            const group = new THREE.Group();
+            
+            // State
+            let runningCountHiLo = 0;
+            let runningCountWong = 0;
+            let totalDecks = 6;
+            let cardsPlayed = 0;
+            let cardCounts = {};
+            let history = [];
+            
+            const cardValuesHiLo = {
+                'A': -1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1,
+                '7': 0, '8': 0, '9': 0, '10': -1, 'J': -1, 'Q': -1, 'K': -1
+            };
+            
+            const cardValuesWong = {
+                'A': -1, '2': 0.5, '3': 1, '4': 1, '5': 1.5, '6': 1,
+                '7': 0.5, '8': 0, '9': -0.5, '10': -1, 'J': -1, 'Q': -1, 'K': -1
+            };
+            
+            const allCards = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+            
+            allCards.forEach(card => cardCounts[card] = 0);
+            
+            function getRemainingDecks() {
+                return totalDecks - (cardsPlayed / 52);
+            }
+            
+            function getTrueCountHiLo() {
+                const remaining = getRemainingDecks();
+                return remaining <= 0 ? 0 : runningCountHiLo / remaining;
+            }
+            
+            function getTrueCountWong() {
+                const remaining = getRemainingDecks();
+                return remaining <= 0 ? 0 : runningCountWong / remaining;
+            }
+            
+            // Main panel
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(2, 1.4, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x0a0a1a, metalness: 0.8, roughness: 0.2 })
+            );
+            group.add(body);
+            
+            // Title
+            const titleCanvas = document.createElement('canvas');
+            titleCanvas.width = 1024; titleCanvas.height = 128;
+            const titleCtx = titleCanvas.getContext('2d');
+            titleCtx.fillStyle = '#000';
+            titleCtx.fillRect(0, 0, 1024, 128);
+            titleCtx.fillStyle = '#ff0066';
+            titleCtx.font = 'bold 64px Courier';
+            titleCtx.textAlign = 'center';
+            titleCtx.fillText('🃏 BLACKJACK COUNTER', 512, 80);
+            
+            const titleMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.9, 0.12),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(titleCanvas) })
+            );
+            titleMesh.position.set(0, 0.64, 0.026);
+            group.add(titleMesh);
+            
+            // Counts Display
+            const countsCanvas = document.createElement('canvas');
+            countsCanvas.width = 1024; countsCanvas.height = 256;
+            const countsCtx = countsCanvas.getContext('2d');
+            const countsTex = new THREE.CanvasTexture(countsCanvas);
+            
+            function updateCounts() {
+                countsCtx.fillStyle = '#000';
+                countsCtx.fillRect(0, 0, 1024, 256);
+                
+                // Running Counts
+                countsCtx.font = 'bold 32px Courier';
+                countsCtx.fillStyle = '#00ff00';
+                countsCtx.textAlign = 'left';
+                countsCtx.fillText('RC Hi-Lo:', 20, 50);
+                countsCtx.fillStyle = runningCountHiLo > 0 ? '#0f0' : (runningCountHiLo < 0 ? '#f00' : '#888');
+                countsCtx.fillText((runningCountHiLo > 0 ? '+' : '') + runningCountHiLo, 220, 50);
+                
+                countsCtx.fillStyle = '#ff00ff';
+                countsCtx.fillText('RC Wong:', 520, 50);
+                countsCtx.fillStyle = runningCountWong > 0 ? '#0f0' : (runningCountWong < 0 ? '#f00' : '#888');
+                countsCtx.fillText((runningCountWong > 0 ? '+' : '') + runningCountWong.toFixed(1), 720, 50);
+                
+                // True Counts
+                const tcHiLo = getTrueCountHiLo();
+                const tcWong = getTrueCountWong();
+                
+                countsCtx.font = 'bold 48px Courier';
+                countsCtx.fillStyle = '#00ffff';
+                countsCtx.textAlign = 'left';
+                countsCtx.fillText('TC Hi-Lo:', 20, 140);
+                countsCtx.fillStyle = tcHiLo > 0 ? '#0f0' : (tcHiLo < 0 ? '#f00' : '#888');
+                countsCtx.fillText((tcHiLo > 0 ? '+' : '') + tcHiLo.toFixed(2), 220, 140);
+                
+                countsCtx.fillStyle = '#ff0080';
+                countsCtx.fillText('TC Wong:', 520, 140);
+                countsCtx.fillStyle = tcWong > 0 ? '#0f0' : (tcWong < 0 ? '#f00' : '#888');
+                countsCtx.fillText((tcWong > 0 ? '+' : '') + tcWong.toFixed(2), 720, 140);
+                
+                // Remaining decks
+                countsCtx.font = 'bold 36px Courier';
+                countsCtx.fillStyle = '#ffff00';
+                countsCtx.textAlign = 'center';
+                countsCtx.fillText('Decks: ' + getRemainingDecks().toFixed(2), 512, 220);
+                
+                countsTex.needsUpdate = true;
+            }
+            
+            const countsMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.9, 0.25),
+                new THREE.MeshBasicMaterial({ map: countsTex })
+            );
+            countsMesh.position.set(0, 0.4, 0.026);
+            group.add(countsMesh);
+            updateCounts();
+            
+            // Card buttons
+            const cardLayout = [
+                ['2','3','4','5','6'],
+                ['7','8','9','10','J'],
+                ['Q','K','A']
+            ];
+            
+            const btnSize = 0.13;
+            const spacing = 0.15;
+            const startY = 0.1;
+            
+            cardLayout.forEach((row, r) => {
+                row.forEach((card, c) => {
+                    const value = cardValuesHiLo[card];
+                    const color = value === 1 ? 0x00ff00 : (value === -1 ? 0xff0066 : 0x888888);
+                    
+                    const btn = new THREE.Mesh(
+                        new THREE.BoxGeometry(btnSize, btnSize, 0.03),
+                        new THREE.MeshStandardMaterial({
+                            color: color,
+                            emissive: color,
+                            emissiveIntensity: 0.3
+                        })
+                    );
+                    
+                    const xOffset = (row.length - 1) * spacing / 2;
+                    btn.position.set(c * spacing - xOffset, startY - r * spacing, 0.036);
+                    
+                    // Card label
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 128; canvas.height = 128;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 80px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(card, 64, 64);
+                    
+                    const label = new THREE.Mesh(
+                        new THREE.PlaneGeometry(btnSize * 0.8, btnSize * 0.8),
+                        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                    );
+                    label.position.z = 0.016;
+                    btn.add(label);
+                    
+                    btn.userData = {
+                        type: 'bjCard',
+                        card: card,
+                        onClick: () => {
+                            const vHiLo = cardValuesHiLo[card];
+                            const vWong = cardValuesWong[card];
+                            runningCountHiLo += vHiLo;
+                            runningCountWong += vWong;
+                            cardsPlayed++;
+                            cardCounts[card]++;
+                            history.push({ card, vHiLo, vWong });
+                            updateCounts();
+                        }
+                    };
+                    
+                    group.add(btn);
+                });
+            });
+            
+            // UNDO button
+            const undoBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.15, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff8800, emissiveIntensity: 0.3 })
+            );
+            undoBtn.position.set(-0.85, -0.15, 0.036);
+            
+            const undoCanvas = document.createElement('canvas');
+            undoCanvas.width = 256; undoCanvas.height = 128;
+            const undoCtx = undoCanvas.getContext('2d');
+            undoCtx.fillStyle = '#fff';
+            undoCtx.font = 'bold 48px Arial';
+            undoCtx.textAlign = 'center';
+            undoCtx.fillText('UNDO', 128, 80);
+            
+            const undoLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.23, 0.13),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(undoCanvas), transparent: true })
+            );
+            undoLabel.position.z = 0.016;
+            undoBtn.add(undoLabel);
+            
+            undoBtn.userData = {
+                type: 'undoBtn',
+                onClick: () => {
+                    if (history.length === 0) return;
+                    const last = history.pop();
+                    runningCountHiLo -= last.vHiLo;
+                    runningCountWong -= last.vWong;
+                    cardsPlayed--;
+                    cardCounts[last.card]--;
+                    updateCounts();
+                }
+            };
+            group.add(undoBtn);
+            
+            // RESET button
+            const resetBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.15, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffff00, emissiveIntensity: 0.3 })
+            );
+            resetBtn.position.set(0.85, -0.15, 0.036);
+            
+            const resetCanvas = document.createElement('canvas');
+            resetCanvas.width = 256; resetCanvas.height = 128;
+            const resetCtx = resetCanvas.getContext('2d');
+            resetCtx.fillStyle = '#000';
+            resetCtx.font = 'bold 48px Arial';
+            resetCtx.textAlign = 'center';
+            resetCtx.fillText('RESET', 128, 80);
+            
+            const resetLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.23, 0.13),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(resetCanvas), transparent: true })
+            );
+            resetLabel.position.z = 0.016;
+            resetBtn.add(resetLabel);
+            
+            resetBtn.userData = {
+                type: 'resetBtn',
+                onClick: () => {
+                    runningCountHiLo = 0;
+                    runningCountWong = 0;
+                    cardsPlayed = 0;
+                    history = [];
+                    allCards.forEach(card => cardCounts[card] = 0);
+                    updateCounts();
+                }
+            };
+            group.add(resetBtn);
+            
+            // Decks selector
+            const decksCanvas = document.createElement('canvas');
+            decksCanvas.width = 512; decksCanvas.height = 128;
+            const decksCtx = decksCanvas.getContext('2d');
+            const decksTex = new THREE.CanvasTexture(decksCanvas);
+            
+            function updateDecks() {
+                decksCtx.fillStyle = '#000';
+                decksCtx.fillRect(0, 0, 512, 128);
+                decksCtx.fillStyle = '#00ffff';
+                decksCtx.font = 'bold 48px Courier';
+                decksCtx.textAlign = 'center';
+                decksCtx.fillText('DECKS: ' + totalDecks, 256, 80);
+                decksTex.needsUpdate = true;
+            }
+            
+            const decksMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.5, 0.12),
+                new THREE.MeshBasicMaterial({ map: decksTex })
+            );
+            decksMesh.position.set(0, -0.4, 0.026);
+            group.add(decksMesh);
+            updateDecks();
+            
+            // Deck - button
+            const deckMinusBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.12, 0.12, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0xff0066, emissive: 0xff0066, emissiveIntensity: 0.3 })
+            );
+            deckMinusBtn.position.set(-0.35, -0.4, 0.036);
+            
+            const minusCanvas = document.createElement('canvas');
+            minusCanvas.width = 128; minusCanvas.height = 128;
+            const minusCtx = minusCanvas.getContext('2d');
+            minusCtx.fillStyle = '#fff';
+            minusCtx.font = 'bold 80px Arial';
+            minusCtx.textAlign = 'center';
+            minusCtx.fillText('-', 64, 80);
+            
+            const minusLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.1, 0.1),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(minusCanvas), transparent: true })
+            );
+            minusLabel.position.z = 0.016;
+            deckMinusBtn.add(minusLabel);
+            
+            deckMinusBtn.userData = {
+                type: 'deckMinus',
+                onClick: () => {
+                    if (totalDecks > 1 && history.length === 0) {
+                        totalDecks--;
+                        updateDecks();
+                        updateCounts();
+                    }
+                }
+            };
+            group.add(deckMinusBtn);
+            
+            // Deck + button
+            const deckPlusBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.12, 0.12, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.3 })
+            );
+            deckPlusBtn.position.set(0.35, -0.4, 0.036);
+            
+            const plusCanvas = document.createElement('canvas');
+            plusCanvas.width = 128; plusCanvas.height = 128;
+            const plusCtx = plusCanvas.getContext('2d');
+            plusCtx.fillStyle = '#fff';
+            plusCtx.font = 'bold 80px Arial';
+            plusCtx.textAlign = 'center';
+            plusCtx.fillText('+', 64, 80);
+            
+            const plusLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.1, 0.1),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(plusCanvas), transparent: true })
+            );
+            plusLabel.position.z = 0.016;
+            deckPlusBtn.add(plusLabel);
+            
+            deckPlusBtn.userData = {
+                type: 'deckPlus',
+                onClick: () => {
+                    if (totalDecks < 8 && history.length === 0) {
+                        totalDecks++;
+                        updateDecks();
+                        updateCounts();
+                    }
+                }
+            };
+            group.add(deckPlusBtn);
+            
+            // History display
+            const historyCanvas = document.createElement('canvas');
+            historyCanvas.width = 1024; historyCanvas.height = 256;
+            const historyCtx = historyCanvas.getContext('2d');
+            const historyTex = new THREE.CanvasTexture(historyCanvas);
+            
+            function updateHistory() {
+                historyCtx.fillStyle = '#000';
+                historyCtx.fillRect(0, 0, 1024, 256);
+                historyCtx.fillStyle = '#00ff00';
+                historyCtx.font = 'bold 28px Courier';
+                historyCtx.textAlign = 'left';
+                historyCtx.fillText('HISTORY:', 20, 35);
+                
+                const last8 = history.slice(-8);
+                last8.forEach((entry, i) => {
+                    const y = 80 + i * 22;
+                    historyCtx.fillStyle = '#888';
+                    historyCtx.fillText(`${entry.card}:`, 20, y);
+                    historyCtx.fillStyle = entry.vHiLo > 0 ? '#0f0' : (entry.vHiLo < 0 ? '#f00' : '#888');
+                    historyCtx.fillText(`HL:${entry.vHiLo > 0 ? '+' : ''}${entry.vHiLo}`, 100, y);
+                    historyCtx.fillStyle = entry.vWong > 0 ? '#0f0' : (entry.vWong < 0 ? '#f00' : '#888');
+                    historyCtx.fillText(`W:${entry.vWong > 0 ? '+' : ''}${entry.vWong.toFixed(1)}`, 220, y);
+                });
+                
+                historyTex.needsUpdate = true;
+            }
+            
+            const historyMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.9, 0.25),
+                new THREE.MeshBasicMaterial({ map: historyTex })
+            );
+            historyMesh.position.set(-0.5, -0.55, 0.026);
+            group.add(historyMesh);
+            
+            // Modify card click to update history
+            group.children.forEach(child => {
+                if (child.userData && child.userData.type === 'bjCard') {
+                    const originalClick = child.userData.onClick;
+                    child.userData.onClick = () => {
+                        originalClick();
+                        updateHistory();
+                    };
+                }
+            });
+            
+            // Modify undo to update history
+            undoBtn.userData.onClick = () => {
+                if (history.length === 0) return;
+                const last = history.pop();
+                runningCountHiLo -= last.vHiLo;
+                runningCountWong -= last.vWong;
+                cardsPlayed--;
+                cardCounts[last.card]--;
+                updateCounts();
+                updateHistory();
+            };
+            
+            // Modify reset to update history
+            resetBtn.userData.onClick = () => {
+                runningCountHiLo = 0;
+                runningCountWong = 0;
+                cardsPlayed = 0;
+                history = [];
+                allCards.forEach(card => cardCounts[card] = 0);
+                updateCounts();
+                updateHistory();
+            };
+            
+            // Close button
+            const closeBtn = new THREE.Mesh(
+                new THREE.CircleGeometry(0.05, 16),
+                new THREE.MeshBasicMaterial({ color: 0xff0000 })
+            );
+            closeBtn.position.set(0.95, 0.64, 0.026);
+            closeBtn.userData = {
+                type: 'closeBtn',
+                onClick: () => {
+                    if (apps.blackjack && apps.blackjack.parent) {
+                        apps.blackjack.traverse(child => {
+                            if (child.geometry) child.geometry.dispose();
+                            if (child.material) {
+                                if (child.material.map) child.material.map.dispose();
+                                child.material.dispose();
+                            }
+                        });
+                        scene.remove(apps.blackjack);
+                    }
+                    apps.blackjack = null;
+                }
+            };
+            group.add(closeBtn);
+            
+            group.position.set(...pos);
+            group.userData = { type: 'app', grabbable: true };
+            scene.add(group);
+            apps.blackjack = group;
+        }
+        
         function downloadHistory(type) {
-            const content = type === 'calculator' ? calcHistory.join('\n') : editorHistory[editorHistory.length - 1] || '';
-            const blob = new Blob([content], { type: 'text/plain' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `${type}_log.txt`;
-            a.click();
-            URL.revokeObjectURL(url);
+            try {
+                let content = '';
+                if (type === 'calculator') {
+                    content = calcHistory.length > 0 ? calcHistory.join('\n') : 'No calculations yet';
+                } else {
+                    content = editorHistory.length > 0 ? editorHistory[editorHistory.length - 1] : 'No text yet';
+                }
+                
+                const blob = new Blob([content], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${type}_log_${Date.now()}.txt`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                console.error('Download error:', err);
+                showError('Could not download file');
+            }
         }
         
         function setupControllers() {
@@ -1201,6 +1692,10 @@
                 const editorButtons = apps.editor.children.filter(c => c.userData && c.userData.type);
                 allObjects.push(...editorButtons);
             }
+            if (apps.blackjack && apps.blackjack.parent) {
+                const bjButtons = apps.blackjack.children.filter(c => c.userData && (c.userData.type === 'bjCard' || c.userData.type === 'undoBtn' || c.userData.type === 'resetBtn' || c.userData.type === 'deckMinus' || c.userData.type === 'deckPlus' || c.userData.type === 'closeBtn'));
+                allObjects.push(...bjButtons);
+            }
             
             const validObjects = allObjects.filter(obj => obj && obj.parent);
             if (validObjects.length === 0) return;
@@ -1217,6 +1712,7 @@
                     const app = obj.userData.app;
                     if (app === 'calculator') createCalculator([0, 1.3, 0.5]);
                     else if (app === 'editor') createEditor([0, 1.3, 0.5]);
+                    else if (app === 'blackjack') createBlackjack([0, 1.3, 0.5]);
                 }
             }
         }
@@ -1238,6 +1734,9 @@
             }
             if (apps.editor && apps.editor.parent && apps.editor.userData.grabbable) {
                 grabbableObjects.push(apps.editor);
+            }
+            if (apps.blackjack && apps.blackjack.parent && apps.blackjack.userData.grabbable) {
+                grabbableObjects.push(apps.blackjack);
             }
             
             const validObjects = grabbableObjects.filter(obj => obj && obj.parent);
@@ -1266,13 +1765,15 @@
         
         function updateLocomotion() {
             const session = renderer.xr.getSession();
-            if (!session) return;
+            if (!session || !session.inputSources) return;
             
             for (let i = 0; i < session.inputSources.length; i++) {
                 const inputSource = session.inputSources[i];
+                if (!inputSource || !inputSource.gamepad) continue;
+                
                 const gamepad = inputSource.gamepad;
                 
-                if (gamepad && gamepad.axes.length >= 4) {
+                if (gamepad.axes && gamepad.axes.length >= 4) {
                     if (inputSource.handedness === 'right') {
                         // Right stick - locomotion
                         const x = gamepad.axes[2];
@@ -1299,12 +1800,15 @@
         async function switchMode(mode) {
             try {
                 const currentSession = renderer.xr.getSession();
-                if (currentSession) await currentSession.end();
-                
-                await new Promise(r => setTimeout(r, 100));
+                if (currentSession) {
+                    await currentSession.end();
+                    await new Promise(r => setTimeout(r, 100));
+                }
                 
                 if (mode === 'vr') {
-                    scene.background = new THREE.Color(0x0a0a1a);
+                    if (scene.background === null || scene.background.r === undefined) {
+                        scene.background = new THREE.Color(0x050510);
+                    }
                     const session = await navigator.xr.requestSession('immersive-vr', {
                         optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
                     });
@@ -1325,6 +1829,7 @@
                 }
             } catch (err) {
                 showError('Error: ' + err.message);
+                console.error('XR Error:', err);
             }
         }
         
