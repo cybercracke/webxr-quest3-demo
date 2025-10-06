@@ -639,39 +639,39 @@
                 const seconds = String(now.getSeconds()).padStart(2, '0');
                 const timeString = `${hours}:${minutes}:${seconds}`;
                 
-                // Clear
-                clockCtx.fillStyle = 'rgba(0,0,0,0)';
+                // Clear completely with opaque black
+                clockCtx.fillStyle = '#000000';
                 clockCtx.fillRect(0, 0, 512, 512);
                 
-                // Title
+                // Title (40px → 48px)
                 clockCtx.fillStyle = '#00ff00';
-                clockCtx.font = 'bold 40px Courier';
+                clockCtx.font = 'bold 48px Courier';
                 clockCtx.textAlign = 'center';
                 clockCtx.fillText('SYSTEM TIME', 256, 80);
                 
-                // Time (large)
-                clockCtx.font = 'bold 80px Courier';
+                // Time (80px → 96px)
+                clockCtx.font = 'bold 96px Courier';
                 clockCtx.fillStyle = '#00ff00';
                 clockCtx.fillText(timeString, 256, 200);
                 
-                // Date
+                // Date (28px → 34px)
                 const date = now.toLocaleDateString('ro-RO', { 
                     day: '2-digit', 
                     month: 'long', 
                     year: 'numeric' 
                 });
-                clockCtx.font = '28px Courier';
+                clockCtx.font = '34px Courier';
                 clockCtx.fillStyle = '#00ff00';
                 clockCtx.fillText(date, 256, 280);
                 
-                // Day of week
+                // Day of week (32px → 38px)
                 const dayNames = ['Duminică', 'Luni', 'Marți', 'Miercuri', 'Joi', 'Vineri', 'Sâmbătă'];
                 const dayName = dayNames[now.getDay()];
-                clockCtx.font = 'bold 32px Courier';
+                clockCtx.font = 'bold 38px Courier';
                 clockCtx.fillText(dayName, 256, 340);
                 
-                // Status indicator
-                clockCtx.font = '24px Courier';
+                // Status indicator (24px → 29px)
+                clockCtx.font = '29px Courier';
                 clockCtx.fillStyle = '#0f0';
                 clockCtx.fillText('● ONLINE', 256, 400);
                 
