@@ -1,0 +1,2263 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cyberpunk Workspace VR/AR - Quest 3</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Courier New', monospace; overflow: hidden; background: #000; }
+        #container { width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 20px; left: 20px; color: #0f0; z-index: 10; background: rgba(0,0,0,0.8); padding: 15px; border: 2px solid #0f0; font-size: 14px; }
+        #controls { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); z-index: 10; display: flex; gap: 15px; }
+        .btn { padding: 12px 24px; font-size: 16px; font-weight: bold; color: #0f0; background: rgba(0,20,0,0.9); border: 2px solid #0f0; cursor: pointer; transition: all 0.3s; text-transform: uppercase; font-family: 'Courier New', monospace; }
+        .btn:hover { background: #0f0; color: #000; box-shadow: 0 0 20px #0f0; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        #error { position: absolute; top: 100px; left: 20px; padding: 10px; background: rgba(139,0,0,0.9); color: #fff; border: 2px solid #f00; display: none; max-width: 400px; z-index: 10; }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="ui">
+        <div>🌐 Cyberpunk Workspace</div>
+        <div id="mode">Mode: Desktop</div>
+        <div id="status">Status: Ready</div>
+    </div>
+    <div id="controls">
+        <button class="btn" id="vrBtn">Enter VR</button>
+        <button class="btn" id="arBtn">Enter AR</button>
+    </div>
+    <div id="error"></div>
+    
+    <!-- Water distortion overlay -->
+    <div id="waterEffect" style="display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: radial-gradient(circle, rgba(0,255,0,0.3), rgba(0,255,0,0.6)); backdrop-filter: blur(10px); z-index: 100; pointer-events: none; animation: waterWave 0.5s ease-in-out;"></div>
+    
+    <style>
+        @keyframes waterWave {
+            0% { opacity: 0; transform: scale(1); filter: blur(0px); }
+            50% { opacity: 1; transform: scale(1.05); filter: blur(15px); }
+            100% { opacity: 0; transform: scale(1); filter: blur(0px); }
+        }
+    </style>
+
+    <script type="importmap">
+    { "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js" } }
+    </script>
+    
+    <script type="module">
+        import * as THREE from 'three';
+        
+        let scene, camera, renderer;
+        let controllers = [], grips = [], raycasters = [];
+        let grabbed = {};
+        let apps = { calc: null, editor: null, blackjack: null };
+        let appButtons = [];
+        let calcHistory = [], editorHistory = [];
+        let dolly;
+        let floatingObjects = [];
+        let holograms = [];
+        let time = 0;
+        let clockMesh = null;
+        let lastClockUpdate = 0;
+        let isTransitioning = false;
+        let transitionProgress = 0;
+        let transitionDirection = { x: 0, z: 0 };
+        
+        const ui = document.getElementById('ui');
+        const modeDiv = document.getElementById('mode');
+        const vrBtn = document.getElementById('vrBtn');
+        const arBtn = document.getElementById('arBtn');
+        const errorDiv = document.getElementById('error');
+        
+        if ('xr' in navigator) {
+            navigator.xr.isSessionSupported('immersive-vr').then(s => { if (!s) vrBtn.disabled = true; });
+            navigator.xr.isSessionSupported('immersive-ar').then(s => { if (!s) arBtn.disabled = true; });
+        } else {
+            vrBtn.disabled = true;
+            arBtn.disabled = true;
+        }
+        
+        function showError(msg) {
+            errorDiv.textContent = msg;
+            errorDiv.style.display = 'block';
+            setTimeout(() => errorDiv.style.display = 'none', 5000);
+        }
+        
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            
+            // Dolly for locomotion
+            dolly = new THREE.Group();
+            dolly.position.set(0, 0, 2);
+            dolly.add(camera);
+            scene.add(dolly);
+            
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.xr.enabled = true;
+            document.getElementById('container').appendChild(renderer.domElement);
+            
+            createCyberpunkRoom();
+            createLighting();
+            createFloatingObjects();
+            createHolograms();
+            createDigitalClock();
+            createAppLaunchers();
+            setupControllers();
+            
+            const handleResize = () => {
+                if (!camera || !renderer) return;
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            };
+            
+            window.addEventListener('resize', handleResize);
+            
+            // Store cleanup function
+            window.webxrCleanup = () => {
+                window.removeEventListener('resize', handleResize);
+                if (renderer) {
+                    renderer.setAnimationLoop(null);
+                    renderer.dispose();
+                }
+            };
+            
+            renderer.setAnimationLoop(animate);
+        }
+        
+        function createCyberpunkRoom() {
+            scene.background = new THREE.Color(0x050510);
+            scene.fog = new THREE.Fog(0x050510, 1, 15);
+            
+            // Floor with hexagon pattern
+            const floorGeo = new THREE.PlaneGeometry(10, 10);
+            const floorCanvas = document.createElement('canvas');
+            floorCanvas.width = 512; floorCanvas.height = 512;
+            const fctx = floorCanvas.getContext('2d');
+            fctx.fillStyle = '#0a0a15';
+            fctx.fillRect(0, 0, 512, 512);
+            fctx.strokeStyle = '#1a1a3a';
+            fctx.lineWidth = 1;
+            for (let i = 0; i < 10; i++) {
+                for (let j = 0; j < 10; j++) {
+                    const x = i * 51.2;
+                    const y = j * 51.2;
+                    fctx.beginPath();
+                    for (let k = 0; k < 6; k++) {
+                        const angle = (k / 6) * Math.PI * 2;
+                        const px = x + 25 + Math.cos(angle) * 20;
+                        const py = y + 25 + Math.sin(angle) * 20;
+                        if (k === 0) fctx.moveTo(px, py);
+                        else fctx.lineTo(px, py);
+                    }
+                    fctx.closePath();
+                    fctx.stroke();
+                }
+            }
+            const floorTex = new THREE.CanvasTexture(floorCanvas);
+            floorTex.repeat.set(2, 2);
+            floorTex.wrapS = floorTex.wrapT = THREE.RepeatWrapping;
+            const floor = new THREE.Mesh(floorGeo, new THREE.MeshStandardMaterial({ 
+                map: floorTex, 
+                emissive: 0x0a0a2a, 
+                emissiveIntensity: 0.2,
+                metalness: 0.8,
+                roughness: 0.4
+            }));
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+            
+            // Walls with grunge texture
+            const wallCanvas = document.createElement('canvas');
+            wallCanvas.width = 512; wallCanvas.height = 512;
+            const wctx = wallCanvas.getContext('2d');
+            wctx.fillStyle = '#0f0f1f';
+            wctx.fillRect(0, 0, 512, 512);
+            for (let i = 0; i < 200; i++) {
+                wctx.fillStyle = `rgba(${Math.random() * 50}, ${Math.random() * 50}, ${Math.random() * 100}, 0.3)`;
+                wctx.fillRect(Math.random() * 512, Math.random() * 512, Math.random() * 20, Math.random() * 20);
+            }
+            const wallTex = new THREE.CanvasTexture(wallCanvas);
+            const wallMat = new THREE.MeshStandardMaterial({ 
+                map: wallTex,
+                color: 0x1a1a2e, 
+                emissive: 0x0a0a1a, 
+                emissiveIntensity: 0.3,
+                roughness: 0.9
+            });
+            
+            const backWall = new THREE.Mesh(new THREE.PlaneGeometry(10, 4), wallMat);
+            backWall.position.set(0, 2, -5);
+            scene.add(backWall);
+            
+            const leftWall = new THREE.Mesh(new THREE.PlaneGeometry(10, 4), wallMat.clone());
+            leftWall.position.set(-5, 2, 0);
+            leftWall.rotation.y = Math.PI / 2;
+            scene.add(leftWall);
+            
+            const rightWall = new THREE.Mesh(new THREE.PlaneGeometry(10, 4), wallMat.clone());
+            rightWall.position.set(5, 2, 0);
+            rightWall.rotation.y = -Math.PI / 2;
+            scene.add(rightWall);
+            
+            // Desk with RGB edge lighting
+            const deskGroup = new THREE.Group();
+            const deskTop = new THREE.Mesh(
+                new THREE.BoxGeometry(2.5, 0.05, 1.2),
+                new THREE.MeshStandardMaterial({ color: 0x1a1a2a, metalness: 0.9, roughness: 0.2 })
+            );
+            deskGroup.add(deskTop);
+            
+            // RGB strip around desk
+            const rgbColors = [0xff00ff, 0x00ffff, 0xff0080, 0x0080ff];
+            for (let i = 0; i < 4; i++) {
+                const strip = new THREE.Mesh(
+                    new THREE.BoxGeometry(i % 2 === 0 ? 2.5 : 1.2, 0.01, 0.02),
+                    new THREE.MeshBasicMaterial({ color: rgbColors[i] })
+                );
+                if (i === 0) strip.position.set(0, -0.025, 0.6);
+                else if (i === 1) strip.position.set(1.25, -0.025, 0);
+                else if (i === 2) strip.position.set(0, -0.025, -0.6);
+                else strip.position.set(-1.25, -0.025, 0);
+                
+                if (i % 2 === 1) strip.rotation.y = Math.PI / 2;
+                deskGroup.add(strip);
+            }
+            
+            deskGroup.position.set(0, 0.75, -1.8);
+            scene.add(deskGroup);
+            
+            // Multiple monitors on desk
+            for (let i = 0; i < 3; i++) {
+                const monitorGroup = new THREE.Group();
+                
+                const screen = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.6, 0.4, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x0a0a0a })
+                );
+                monitorGroup.add(screen);
+                
+                // Screen content with scrolling code
+                const screenCanvas = document.createElement('canvas');
+                screenCanvas.width = 512; screenCanvas.height = 512;
+                const sctx = screenCanvas.getContext('2d');
+                sctx.fillStyle = '#000';
+                sctx.fillRect(0, 0, 512, 512);
+                sctx.fillStyle = i === 0 ? '#0f0' : (i === 1 ? '#0ff' : '#f0f');
+                sctx.font = '12px Courier';
+                const codeLines = [
+                    '> SYSTEM ACTIVE',
+                    '> Loading modules...',
+                    '> Neural link: OK',
+                    '> Firewall: ARMED',
+                    '> Crypto mining...',
+                    '> 01001001 01000001',
+                    '> Access granted',
+                    '> VR session active'
+                ];
+                codeLines.forEach((line, idx) => {
+                    sctx.fillText(line, 10, 30 + idx * 20);
+                });
+                
+                const screenTex = new THREE.CanvasTexture(screenCanvas);
+                const screenDisplay = new THREE.Mesh(
+                    new THREE.PlaneGeometry(0.58, 0.38),
+                    new THREE.MeshBasicMaterial({ map: screenTex, emissive: i === 0 ? 0x00ff00 : (i === 1 ? 0x00ffff : 0xff00ff), emissiveIntensity: 0.5 })
+                );
+                screenDisplay.position.z = 0.011;
+                screen.add(screenDisplay);
+                
+                const stand = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.02, 0.02, 0.15, 8),
+                    new THREE.MeshStandardMaterial({ color: 0x2a2a2a })
+                );
+                stand.position.y = -0.275;
+                monitorGroup.add(stand);
+                
+                monitorGroup.position.set(-0.7 + i * 0.7, 1.15, -1.5);
+                monitorGroup.rotation.x = -0.2;
+                scene.add(monitorGroup);
+            }
+            
+            // Neon strips - more variety
+            const neonPositions = [
+                { pos: [-4, 2.5, -4.9], color: 0xff00ff, size: [0.05, 2.5, 0.05] },
+                { pos: [-2, 2.5, -4.9], color: 0x00ffff, size: [0.05, 2.5, 0.05] },
+                { pos: [0, 3.5, -4.9], color: 0xff0080, size: [3, 0.05, 0.05] },
+                { pos: [2, 2.5, -4.9], color: 0x0080ff, size: [0.05, 2.5, 0.05] },
+                { pos: [4, 2.5, -4.9], color: 0xff00ff, size: [0.05, 2.5, 0.05] },
+            ];
+            
+            neonPositions.forEach(neon => {
+                const tube = new THREE.Mesh(
+                    new THREE.BoxGeometry(...neon.size),
+                    new THREE.MeshBasicMaterial({ color: neon.color })
+                );
+                tube.position.set(...neon.pos);
+                scene.add(tube);
+                
+                const light = new THREE.PointLight(neon.color, 3, 8);
+                light.position.set(...neon.pos);
+                scene.add(light);
+            });
+            
+            // Cyberpunk poster on wall
+            const posterCanvas = document.createElement('canvas');
+            posterCanvas.width = 512; posterCanvas.height = 512;
+            const pctx = posterCanvas.getContext('2d');
+            const gradient = pctx.createLinearGradient(0, 0, 512, 512);
+            gradient.addColorStop(0, '#ff00ff');
+            gradient.addColorStop(0.5, '#00ffff');
+            gradient.addColorStop(1, '#ff0080');
+            pctx.fillStyle = gradient;
+            pctx.fillRect(0, 0, 512, 512);
+            pctx.fillStyle = '#000';
+            pctx.font = 'bold 60px Arial';
+            pctx.textAlign = 'center';
+            pctx.fillText('CYBER', 256, 200);
+            pctx.fillText('PUNK', 256, 280);
+            pctx.font = 'bold 30px Arial';
+            pctx.fillText('2085', 256, 350);
+            
+            const poster = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.5, 1.5),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(posterCanvas) })
+            );
+            poster.position.set(-3, 2.5, -4.95);
+            scene.add(poster);
+            
+            // Digital rain particles
+            const particlesGeo = new THREE.BufferGeometry();
+            const particleCount = 2000;
+            const positions = new Float32Array(particleCount * 3);
+            const colors = new Float32Array(particleCount * 3);
+            
+            for (let i = 0; i < particleCount; i++) {
+                positions[i * 3] = (Math.random() - 0.5) * 15;
+                positions[i * 3 + 1] = Math.random() * 5;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 15;
+                
+                const color = Math.random();
+                if (color < 0.33) {
+                    colors[i * 3] = 1; colors[i * 3 + 1] = 0; colors[i * 3 + 2] = 1; // Magenta
+                } else if (color < 0.66) {
+                    colors[i * 3] = 0; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 1; // Cyan
+                } else {
+                    colors[i * 3] = 0; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 0; // Green
+                }
+            }
+            
+            particlesGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            particlesGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            
+            const particlesMat = new THREE.PointsMaterial({
+                size: 0.03,
+                vertexColors: true,
+                transparent: true,
+                opacity: 0.6,
+                blending: THREE.AdditiveBlending
+            });
+            
+            const particles = new THREE.Points(particlesGeo, particlesMat);
+            particles.userData.isParticles = true;
+            scene.add(particles);
+            
+            // Cables on desk
+            for (let i = 0; i < 5; i++) {
+                const curve = new THREE.CatmullRomCurve3([
+                    new THREE.Vector3(-1 + i * 0.5, 0.8, -1.2),
+                    new THREE.Vector3(-0.8 + i * 0.4, 0.85, -1.4),
+                    new THREE.Vector3(-0.6 + i * 0.3, 0.8, -1.6)
+                ]);
+                
+                const cableGeo = new THREE.TubeGeometry(curve, 20, 0.01, 8, false);
+                const cableMat = new THREE.MeshStandardMaterial({ 
+                    color: i % 2 === 0 ? 0x1a1a1a : 0x2a2a2a,
+                    metalness: 0.8,
+                    roughness: 0.3
+                });
+                const cable = new THREE.Mesh(cableGeo, cableMat);
+                scene.add(cable);
+            }
+        }
+        
+        function createLighting() {
+            scene.add(new THREE.AmbientLight(0x2a2a3a, 0.3));
+            
+            // Main colored lights
+            const lightConfigs = [
+                { color: 0xff00ff, pos: [3, 2.5, 3], intensity: 4 },
+                { color: 0x00ffff, pos: [-3, 2.5, 3], intensity: 4 },
+                { color: 0xff0080, pos: [3, 2.5, -3], intensity: 4 },
+                { color: 0x0080ff, pos: [-3, 2.5, -3], intensity: 4 },
+                { color: 0x00ff00, pos: [0, 2, -1.5], intensity: 2 }
+            ];
+            
+            lightConfigs.forEach(config => {
+                const light = new THREE.PointLight(config.color, config.intensity, 12);
+                light.position.set(...config.pos);
+                scene.add(light);
+            });
+            
+            // Spotlight on desk
+            const spotlight = new THREE.SpotLight(0xffffff, 2, 10, Math.PI / 6, 0.5);
+            spotlight.position.set(0, 3.5, -1);
+            spotlight.target.position.set(0, 0.75, -1.8);
+            scene.add(spotlight);
+            scene.add(spotlight.target);
+        }
+        
+        function createFloatingObjects() {
+            const geometries = [
+                new THREE.BoxGeometry(0.3, 0.3, 0.3),
+                new THREE.SphereGeometry(0.2, 32, 32),
+                new THREE.ConeGeometry(0.2, 0.4, 32),
+                new THREE.TorusGeometry(0.2, 0.08, 16, 100),
+                new THREE.OctahedronGeometry(0.2),
+                new THREE.TetrahedronGeometry(0.25),
+                new THREE.IcosahedronGeometry(0.2),
+                new THREE.DodecahedronGeometry(0.2)
+            ];
+            
+            const colors = [
+                0xff00ff, 0x00ffff, 0xff0080, 0x0080ff,
+                0x00ff00, 0xff6600, 0x6600ff, 0xffff00
+            ];
+            
+            for (let i = 0; i < 8; i++) {
+                const material = new THREE.MeshStandardMaterial({
+                    color: colors[i],
+                    metalness: 0.7,
+                    roughness: 0.2,
+                    emissive: colors[i],
+                    emissiveIntensity: 0.4,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                
+                const mesh = new THREE.Mesh(geometries[i], material);
+                
+                const angle = (i / 8) * Math.PI * 2;
+                const radius = 3;
+                mesh.position.set(
+                    Math.cos(angle) * radius,
+                    2 + Math.sin(i) * 0.3,
+                    Math.sin(angle) * radius
+                );
+                
+                mesh.userData = {
+                    initialY: mesh.position.y,
+                    rotationSpeed: 0.003 + Math.random() * 0.005,
+                    floatSpeed: 0.3 + Math.random() * 0.3,
+                    floatOffset: Math.random() * Math.PI * 2,
+                    floatAmplitude: 0.2,
+                    grabbable: true
+                };
+                
+                scene.add(mesh);
+                floatingObjects.push(mesh);
+                
+                // Add point light for each object
+                const light = new THREE.PointLight(colors[i], 1.5, 5);
+                light.position.copy(mesh.position);
+                mesh.userData.light = light;
+                scene.add(light);
+            }
+        }
+        
+        function createHolograms() {
+            // Hologram 1: Stats panel
+            const holo1 = createHologramPanel(
+                'SYSTEM STATUS',
+                [
+                    'CPU: 67%',
+                    'RAM: 8.2/16 GB',
+                    'NET: 1.2 Gb/s',
+                    'TEMP: 42°C'
+                ],
+                0x00ffff
+            );
+            holo1.position.set(-2.5, 2, 1);
+            holo1.rotation.y = Math.PI / 4;
+            scene.add(holo1);
+            holograms.push(holo1);
+            
+            // Hologram 2: Neural interface
+            const holo2 = createHologramPanel(
+                'NEURAL LINK',
+                [
+                    'Status: ACTIVE',
+                    'Sync: 98.7%',
+                    'Latency: 2ms',
+                    'Bandwidth: OK'
+                ],
+                0xff00ff
+            );
+            holo2.position.set(2.5, 2, 1);
+            holo2.rotation.y = -Math.PI / 4;
+            scene.add(holo2);
+            holograms.push(holo2);
+            
+            // Hologram 3: Crypto ticker
+            const holo3 = createHologramPanel(
+                'CRYPTO FEED',
+                [
+                    'BTC: $67,420',
+                    'ETH: $3,245',
+                    'SOL: $142',
+                    'ADA: $0.58'
+                ],
+                0x00ff00
+            );
+            holo3.position.set(0, 2.5, -3);
+            scene.add(holo3);
+            holograms.push(holo3);
+            
+            // Floating holographic rings
+            for (let i = 0; i < 3; i++) {
+                const ringGeo = new THREE.TorusGeometry(0.4, 0.02, 16, 100);
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: i === 0 ? 0xff00ff : (i === 1 ? 0x00ffff : 0x00ff00),
+                    transparent: true,
+                    opacity: 0.4,
+                    side: THREE.DoubleSide
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.position.set(-3 + i * 3, 2.5, -2);
+                ring.userData = {
+                    rotationSpeed: 0.002 + i * 0.001,
+                    floatSpeed: 0.2,
+                    floatOffset: i * Math.PI / 1.5,
+                    initialY: 2.5,
+                    isHologramRing: true
+                };
+                scene.add(ring);
+                holograms.push(ring);
+            }
+        }
+        
+        function createHologramPanel(title, lines, color) {
+            const group = new THREE.Group();
+            
+            // Background panel
+            const panel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.8, 0.6),
+                new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.15,
+                    side: THREE.DoubleSide
+                })
+            );
+            group.add(panel);
+            
+            // Border
+            const borderGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(0.8, 0.6));
+            const borderMat = new THREE.LineBasicMaterial({ color: color });
+            const border = new THREE.LineSegments(borderGeo, borderMat);
+            group.add(border);
+            
+            // Text content
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'rgba(0,0,0,0)';
+            ctx.fillRect(0, 0, 512, 512);
+            
+            // Title
+            ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
+            ctx.font = 'bold 40px Courier';
+            ctx.textAlign = 'center';
+            ctx.fillText(title, 256, 80);
+            
+            // Lines
+            ctx.font = '28px Courier';
+            ctx.textAlign = 'left';
+            lines.forEach((line, i) => {
+                ctx.fillText(line, 60, 160 + i * 50);
+            });
+            
+            const textTex = new THREE.CanvasTexture(canvas);
+            const textMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.78, 0.58),
+                new THREE.MeshBasicMaterial({ 
+                    map: textTex, 
+                    transparent: true,
+                    opacity: 0.9
+                })
+            );
+            textMesh.position.z = 0.001;
+            group.add(textMesh);
+            
+            group.userData = {
+                floatSpeed: 0.15,
+                floatOffset: Math.random() * Math.PI * 2,
+                initialY: group.position.y,
+                pulseSpeed: 0.5,
+                isHologram: true
+            };
+            
+            return group;
+        }
+        
+        function createDigitalClock() {
+            const group = new THREE.Group();
+            
+            // Background panel (semi-transparent)
+            const panel = new THREE.Mesh(
+                new THREE.PlaneGeometry(1, 0.6),
+                new THREE.MeshBasicMaterial({
+                    color: 0x00ff00,
+                    transparent: true,
+                    opacity: 0.15,
+                    side: THREE.DoubleSide
+                })
+            );
+            group.add(panel);
+            
+            // Border
+            const borderGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(1, 0.6));
+            const borderMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+            const border = new THREE.LineSegments(borderGeo, borderMat);
+            group.add(border);
+            
+            // Clock display canvas
+            const clockCanvas = document.createElement('canvas');
+            clockCanvas.width = 512;
+            clockCanvas.height = 512;
+            const clockCtx = clockCanvas.getContext('2d');
+            const clockTex = new THREE.CanvasTexture(clockCanvas);
+            
+            function updateClock() {
+                const now = new Date();
+                const hours = String(now.getHours()).padStart(2, '0');
+                const minutes = String(now.getMinutes()).padStart(2, '0');
+                const seconds = String(now.getSeconds()).padStart(2, '0');
+                const timeString = `${hours}:${minutes}:${seconds}`;
+                
+                // Clear completely with opaque black
+                clockCtx.fillStyle = '#000000';
+                clockCtx.fillRect(0, 0, 512, 512);
+                
+                // Title (40px → 48px)
+                clockCtx.fillStyle = '#00ff00';
+                clockCtx.font = 'bold 48px Courier';
+                clockCtx.textAlign = 'center';
+                clockCtx.fillText('SYSTEM TIME', 256, 80);
+                
+                // Time (80px → 96px)
+                clockCtx.font = 'bold 96px Courier';
+                clockCtx.fillStyle = '#00ff00';
+                clockCtx.fillText(timeString, 256, 200);
+                
+                // Date (28px → 34px)
+                const date = now.toLocaleDateString('ro-RO', { 
+                    day: '2-digit', 
+                    month: 'long', 
+                    year: 'numeric' 
+                });
+                clockCtx.font = '34px Courier';
+                clockCtx.fillStyle = '#00ff00';
+                clockCtx.fillText(date, 256, 280);
+                
+                // Day of week (32px → 38px)
+                const dayNames = ['Duminică', 'Luni', 'Marți', 'Miercuri', 'Joi', 'Vineri', 'Sâmbătă'];
+                const dayName = dayNames[now.getDay()];
+                clockCtx.font = 'bold 38px Courier';
+                clockCtx.fillText(dayName, 256, 340);
+                
+                // Status indicator (24px → 29px)
+                clockCtx.font = '29px Courier';
+                clockCtx.fillStyle = '#0f0';
+                clockCtx.fillText('● ONLINE', 256, 400);
+                
+                clockTex.needsUpdate = true;
+            }
+            
+            const textMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.98, 0.58),
+                new THREE.MeshBasicMaterial({ 
+                    map: clockTex, 
+                    transparent: true,
+                    opacity: 0.9
+                })
+            );
+            textMesh.position.z = 0.001;
+            group.add(textMesh);
+            
+            // Store update function
+            group.userData.updateClock = updateClock;
+            group.userData.floatSpeed = 0.15;
+            group.userData.floatOffset = Math.PI;
+            group.userData.initialY = 2.2;
+            group.userData.pulseSpeed = 0.5;
+            group.userData.isHologram = true;
+            group.userData.grabbable = true;
+            updateClock();
+            
+            // Position
+            group.position.set(2.8, 2.2, -2);
+            group.rotation.y = -Math.PI / 6;
+            
+            scene.add(group);
+            clockMesh = group;
+            holograms.push(group);
+        }
+        
+        function createAppLaunchers() {
+            const btnData = [
+                { name: 'Calculator', icon: '🔢', pos: [-1.2, 1.3, 0.8], color: 0x00ff00 },
+                { name: 'Editor', icon: '📝', pos: [-0.4, 1.3, 0.8], color: 0x00ffff },
+                { name: 'Blackjack', icon: '🃏', pos: [0.4, 1.3, 0.8], color: 0xff0066 },
+                { name: 'Exit', icon: '❌', pos: [1.2, 1.3, 0.8], color: 0xff0000 }
+            ];
+            
+            btnData.forEach(data => {
+                const group = new THREE.Group();
+                
+                const btn = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.4, 0.4, 0.1),
+                    new THREE.MeshStandardMaterial({ 
+                        color: data.color, 
+                        emissive: data.color, 
+                        emissiveIntensity: 0.5,
+                        metalness: 0.8,
+                        roughness: 0.2
+                    })
+                );
+                group.add(btn);
+                
+                const canvas = document.createElement('canvas');
+                canvas.width = 256; canvas.height = 256;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#fff';
+                ctx.font = 'bold 120px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(data.icon, 128, 128);
+                
+                const icon = new THREE.Mesh(
+                    new THREE.PlaneGeometry(0.3, 0.3),
+                    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                );
+                icon.position.z = 0.051;
+                group.add(icon);
+                
+                group.position.set(...data.pos);
+                group.userData = { 
+                    type: 'launcher', 
+                    app: data.name.toLowerCase(),
+                    grabbable: true
+                };
+                
+                scene.add(group);
+                appButtons.push(group);
+            });
+        }
+        
+        // Helper function to create 3D close button
+        function create3DCloseButton(position) {
+            const group = new THREE.Group();
+            
+            // Create semi-sphere
+            const sphereGeo = new THREE.SphereGeometry(0.04, 16, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+            const sphereMat = new THREE.MeshPhongMaterial({ 
+                color: 0xff0000,
+                emissive: 0xff0000,
+                emissiveIntensity: 0.3,
+                shininess: 100
+            });
+            const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+            sphere.rotation.x = -Math.PI / 2;
+            group.add(sphere);
+            
+            // Add X symbol
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.moveTo(16, 16);
+            ctx.lineTo(48, 48);
+            ctx.moveTo(48, 16);
+            ctx.lineTo(16, 48);
+            ctx.stroke();
+            
+            const xMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.05, 0.05),
+                new THREE.MeshBasicMaterial({ 
+                    map: new THREE.CanvasTexture(canvas), 
+                    transparent: true 
+                })
+            );
+            xMesh.position.z = 0.02;
+            group.add(xMesh);
+            
+            // Add subtle glow effect
+            const glowGeo = new THREE.RingGeometry(0.035, 0.05, 32);
+            const glowMat = new THREE.MeshBasicMaterial({
+                color: 0xff0000,
+                transparent: true,
+                opacity: 0.3,
+                side: THREE.DoubleSide
+            });
+            const glow = new THREE.Mesh(glowGeo, glowMat);
+            glow.position.z = 0.01;
+            group.add(glow);
+            
+            group.position.set(...position);
+            return group;
+        }
+        
+        function createCalculator(pos) {
+            if (apps.calc) {
+                // Cleanup old calculator
+                apps.calc.traverse(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (child.material.map) child.material.map.dispose();
+                        child.material.dispose();
+                    }
+                });
+                scene.remove(apps.calc);
+            }
+            
+            const group = new THREE.Group();
+            let display = '0';
+            let memory = 0;
+            let operator = null;
+            let newNumber = true;
+            
+            group.add(new THREE.Mesh(
+                new THREE.BoxGeometry(0.6, 0.8, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x1a1a2a, metalness: 0.7, roughness: 0.3 })
+            ));
+            
+            const dispCanvas = document.createElement('canvas');
+            dispCanvas.width = 512; dispCanvas.height = 128;
+            const dispCtx = dispCanvas.getContext('2d');
+            const dispTex = new THREE.CanvasTexture(dispCanvas);
+            
+            function updateDisplay() {
+                dispCtx.fillStyle = '#0a0a1a';
+                dispCtx.fillRect(0, 0, 512, 128);
+                dispCtx.fillStyle = '#0f0';
+                dispCtx.font = 'bold 48px Courier';
+                dispCtx.textAlign = 'right';
+                dispCtx.textBaseline = 'middle';
+                dispCtx.fillText(display.slice(-12), 500, 64);
+                dispTex.needsUpdate = true;
+            }
+            
+            const dispMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.55, 0.15),
+                new THREE.MeshBasicMaterial({ map: dispTex })
+            );
+            dispMesh.position.set(0, 0.3, 0.026);
+            group.add(dispMesh);
+            updateDisplay();
+            
+            const btnLayout = [
+                ['C', '√', '%', '/'],
+                ['7', '8', '9', '*'],
+                ['4', '5', '6', '-'],
+                ['1', '2', '3', '+'],
+                ['0', '.', 'log', '=']
+            ];
+            
+            const btnSize = 0.1;
+            const spacing = 0.12;
+            
+            btnLayout.forEach((row, r) => {
+                row.forEach((label, c) => {
+                    const btn = new THREE.Mesh(
+                        new THREE.BoxGeometry(btnSize, btnSize, 0.02),
+                        new THREE.MeshStandardMaterial({ 
+                            color: label === '=' ? 0x00ff00 : 0x2a2a4a,
+                            emissive: label === '=' ? 0x00ff00 : 0x0a0a1a,
+                            emissiveIntensity: 0.3
+                        })
+                    );
+                    
+                    btn.position.set(-0.18 + c * spacing, 0.1 - r * spacing, 0.036);
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 128; canvas.height = 128;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 60px Courier';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(label, 64, 64);
+                    
+                    const labelMesh = new THREE.Mesh(
+                        new THREE.PlaneGeometry(btnSize * 0.8, btnSize * 0.8),
+                        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                    );
+                    labelMesh.position.z = 0.011;
+                    btn.add(labelMesh);
+                    
+                    btn.userData = { 
+                        type: 'calcBtn', 
+                        onClick: () => handleCalcInput(label)
+                    };
+                    
+                    group.add(btn);
+                });
+            });
+            
+            function handleCalcInput(input) {
+                if (input >= '0' && input <= '9') {
+                    display = newNumber ? input : (display === '0' ? input : display + input);
+                    newNumber = false;
+                } else if (input === '.') {
+                    if (!display.includes('.')) display += '.';
+                } else if (input === 'C') {
+                    display = '0';
+                    memory = 0;
+                    operator = null;
+                    newNumber = true;
+                } else if (input === '√') {
+                    display = String(Math.sqrt(parseFloat(display)));
+                    newNumber = true;
+                } else if (input === 'log') {
+                    display = String(Math.log10(parseFloat(display)));
+                    newNumber = true;
+                } else if (input === '%') {
+                    display = String(parseFloat(display) / 100);
+                    newNumber = true;
+                } else if (['+', '-', '*', '/'].includes(input)) {
+                    if (operator && !newNumber) {
+                        const result = calculate(memory, parseFloat(display), operator);
+                        display = String(result);
+                        memory = result;
+                    } else {
+                        memory = parseFloat(display);
+                    }
+                    operator = input;
+                    newNumber = true;
+                } else if (input === '=') {
+                    if (operator) {
+                        const result = calculate(memory, parseFloat(display), operator);
+                        display = String(result);
+                        calcHistory.push(`${memory} ${operator} ${parseFloat(display)} = ${result}`);
+                        memory = 0;
+                        operator = null;
+                        newNumber = true;
+                    }
+                }
+                updateDisplay();
+            }
+            
+            function calculate(a, b, op) {
+                switch(op) {
+                    case '+': return a + b;
+                    case '-': return a - b;
+                    case '*': return a * b;
+                    case '/': return b !== 0 ? a / b : 0;
+                    default: return b;
+                }
+            }
+            
+            // 3D Close button
+            const closeBtn = create3DCloseButton([0.25, 0.35, 0.026]);
+            closeBtn.userData = { 
+                type: 'closeBtn',
+                onClick: () => {
+                    if (apps.calc && apps.calc.parent) {
+                        apps.calc.traverse(child => {
+                            if (child.geometry) child.geometry.dispose();
+                            if (child.material) {
+                                if (child.material.map) child.material.map.dispose();
+                                child.material.dispose();
+                            }
+                        });
+                        scene.remove(apps.calc);
+                    }
+                    apps.calc = null;
+                }
+            };
+            group.add(closeBtn);
+            
+            const dlBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.08, 0.02),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff, emissive: 0x0000ff, emissiveIntensity: 0.3 })
+            );
+            dlBtn.position.set(0, -0.45, 0.026);
+            dlBtn.userData = {
+                type: 'downloadBtn',
+                onClick: () => downloadHistory('calculator')
+            };
+            group.add(dlBtn);
+            
+            group.position.set(...pos);
+            group.userData = { type: 'app', grabbable: true };
+            scene.add(group);
+            apps.calc = group;
+        }
+        
+        function createEditor(pos) {
+            if (apps.editor) {
+                // Cleanup old editor
+                apps.editor.traverse(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (child.material.map) child.material.map.dispose();
+                        child.material.dispose();
+                    }
+                });
+                scene.remove(apps.editor);
+            }
+            
+            const group = new THREE.Group();
+            let text = '';
+            let cursorPos = 0;
+            let capsLock = false;
+            let shiftActive = false;
+            
+            group.add(new THREE.Mesh(
+                new THREE.BoxGeometry(1.2, 1, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x1a1a2a, metalness: 0.7, roughness: 0.3 })
+            ));
+            
+            const textCanvas = document.createElement('canvas');
+            textCanvas.width = 1024; textCanvas.height = 512;
+            const textCtx = textCanvas.getContext('2d');
+            const textTex = new THREE.CanvasTexture(textCanvas);
+            
+            function updateTextDisplay() {
+                textCtx.fillStyle = '#1a1a2a';
+                textCtx.fillRect(0, 0, 1024, 512);
+                textCtx.fillStyle = '#ffffff';
+                textCtx.font = '24px Courier';
+                textCtx.textAlign = 'left';
+                textCtx.textBaseline = 'top';
+                
+                const lines = text.split('\n');
+                const charWidth = 14.4;
+                const lineHeight = 29;
+                
+                lines.forEach((line, i) => {
+                    textCtx.fillText(line, 10, 10 + i * lineHeight);
+                });
+                
+                // Cursor
+                let charCount = 0;
+                let cursorX = 10;
+                let cursorY = 10;
+                
+                for (let i = 0; i < lines.length; i++) {
+                    if (charCount + lines[i].length >= cursorPos) {
+                        cursorX = 10 + (cursorPos - charCount) * charWidth;
+                        cursorY = 10 + i * lineHeight;
+                        break;
+                    }
+                    charCount += lines[i].length + 1;
+                }
+                
+                textCtx.fillStyle = '#0f0';
+                textCtx.fillRect(cursorX, cursorY, 3, 24);
+                
+                textTex.needsUpdate = true;
+            }
+            
+            const textMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.1, 0.55),
+                new THREE.MeshBasicMaterial({ map: textTex })
+            );
+            textMesh.position.set(0, 0.2, 0.026);
+            group.add(textMesh);
+            updateTextDisplay();
+            
+            const keyboard = createVirtualKeyboard();
+            keyboard.position.set(0, -0.45, 0.026);
+            keyboard.scale.set(0.75, 0.75, 0.75);
+            group.add(keyboard);
+            
+            function createVirtualKeyboard() {
+                const kbGroup = new THREE.Group();
+                const keys = [
+                    ['1','2','3','4','5','6','7','8','9','0'],
+                    ['Q','W','E','R','T','Y','U','I','O','P'],
+                    ['A','S','D','F','G','H','J','K','L'],
+                    ['Z','X','C','V','B','N','M','⌫']
+                ];
+                
+                const keySize = 0.06;
+                const spacing = 0.065;
+                const keyMeshes = {};
+                
+                keys.forEach((row, r) => {
+                    row.forEach((key, c) => {
+                        const keyMesh = new THREE.Mesh(
+                            new THREE.BoxGeometry(keySize, keySize, 0.02),
+                            new THREE.MeshStandardMaterial({ color: 0x2a2a4a, emissive: 0x0a0a1a, emissiveIntensity: 0.3 })
+                        );
+                        
+                        keyMesh.position.set(-0.3 + c * spacing, -r * spacing, 0);
+                        
+                        const canvas = document.createElement('canvas');
+                        canvas.width = 64; canvas.height = 64;
+                        const ctx = canvas.getContext('2d');
+                        
+                        keyMesh.userData.updateLabel = () => {
+                            ctx.clearRect(0, 0, 64, 64);
+                            ctx.fillStyle = '#fff';
+                            ctx.font = 'bold 32px Arial';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            let displayKey = key;
+                            if (key !== '⌫' && key.match(/[A-Z]/)) {
+                                displayKey = (capsLock || shiftActive) ? key : key.toLowerCase();
+                            }
+                            ctx.fillText(displayKey, 32, 32);
+                            if (keyMesh.children[0]) {
+                                keyMesh.children[0].material.map.needsUpdate = true;
+                            }
+                        };
+                        
+                        const label = new THREE.Mesh(
+                            new THREE.PlaneGeometry(keySize * 0.7, keySize * 0.7),
+                            new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                        );
+                        label.position.z = 0.011;
+                        keyMesh.add(label);
+                        
+                        // Initialize label immediately
+                        keyMesh.userData.updateLabel();
+                        
+                        keyMesh.userData = {
+                            ...keyMesh.userData,
+                            type: 'keyBtn',
+                            key: key,
+                            onClick: () => handleKeyPress(key)
+                        };
+                        
+                        keyMeshes[key] = keyMesh;
+                        kbGroup.add(keyMesh);
+                    });
+                });
+                
+                // Space
+                const spaceBar = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.3, keySize, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x2a2a4a })
+                );
+                spaceBar.position.set(-0.1, -keys.length * spacing, 0);
+                spaceBar.userData = { type: 'keyBtn', onClick: () => handleKeyPress(' ') };
+                kbGroup.add(spaceBar);
+                
+                // Enter
+                const enterKey = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.12, keySize, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x00ff00 })
+                );
+                enterKey.position.set(0.25, -keys.length * spacing, 0);
+                enterKey.userData = { type: 'keyBtn', onClick: () => handleKeyPress('\n') };
+                kbGroup.add(enterKey);
+                
+                // Shift
+                const shiftKey = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.12, keySize, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x4a4a6a })
+                );
+                shiftKey.position.set(-0.4, -keys.length * spacing, 0);
+                shiftKey.userData = { 
+                    type: 'keyBtn', 
+                    onClick: () => {
+                        shiftActive = !shiftActive;
+                        Object.values(keyMeshes).forEach(k => {
+                            if (k.userData && k.userData.updateLabel) {
+                                k.userData.updateLabel();
+                            }
+                        });
+                    }
+                };
+                kbGroup.add(shiftKey);
+                
+                // CapsLock
+                const capsKey = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.12, keySize, 0.02),
+                    new THREE.MeshStandardMaterial({ color: 0x4a4a6a })
+                );
+                capsKey.position.set(0.4, -keys.length * spacing, 0);
+                capsKey.userData = { 
+                    type: 'keyBtn',
+                    mesh: capsKey,
+                    onClick: () => {
+                        capsLock = !capsLock;
+                        capsKey.material.color.setHex(capsLock ? 0x00ff00 : 0x4a4a6a);
+                        Object.values(keyMeshes).forEach(k => {
+                            if (k.userData && k.userData.updateLabel) {
+                                k.userData.updateLabel();
+                            }
+                        });
+                    }
+                };
+                kbGroup.add(capsKey);
+                
+                // Arrow keys
+                const arrowY = -(keys.length + 1) * spacing;
+                const arrows = [
+                    { key: '←', pos: [-0.2, arrowY, 0] },
+                    { key: '↑', pos: [-0.13, arrowY + 0.065, 0] },
+                    { key: '↓', pos: [-0.13, arrowY, 0] },
+                    { key: '→', pos: [-0.06, arrowY, 0] }
+                ];
+                
+                arrows.forEach(arrow => {
+                    const arrowKey = new THREE.Mesh(
+                        new THREE.BoxGeometry(keySize, keySize, 0.02),
+                        new THREE.MeshStandardMaterial({ color: 0x2a4a4a })
+                    );
+                    arrowKey.position.set(...arrow.pos);
+                    
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 64; canvas.height = 64;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 32px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(arrow.key, 32, 32);
+                    
+                    const label = new THREE.Mesh(
+                        new THREE.PlaneGeometry(keySize * 0.7, keySize * 0.7),
+                        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                    );
+                    label.position.z = 0.011;
+                    arrowKey.add(label);
+                    
+                    arrowKey.userData = { type: 'keyBtn', onClick: () => handleArrow(arrow.key) };
+                    kbGroup.add(arrowKey);
+                });
+                
+                // Store reference to keyboard group for updates
+                kbGroup.userData.keyMeshes = keyMeshes;
+                
+                return kbGroup;
+            }
+            
+            function handleKeyPress(key) {
+                if (key === '⌫') {
+                    if (cursorPos > 0) {
+                        text = text.slice(0, cursorPos - 1) + text.slice(cursorPos);
+                        cursorPos--;
+                    }
+                } else if (key === '\n') {
+                    text = text.slice(0, cursorPos) + '\n' + text.slice(cursorPos);
+                    cursorPos++;
+                } else {
+                    let char = key;
+                    if (key.match(/[A-Z]/) && !capsLock && !shiftActive) {
+                        char = key.toLowerCase();
+                    }
+                    text = text.slice(0, cursorPos) + char + text.slice(cursorPos);
+                    cursorPos++;
+                    if (shiftActive) {
+                        shiftActive = false;
+                        // Update all key labels
+                        if (keyboard.userData && keyboard.userData.keyMeshes) {
+                            Object.values(keyboard.userData.keyMeshes).forEach(k => {
+                                if (k.userData && k.userData.updateLabel) {
+                                    k.userData.updateLabel();
+                                }
+                            });
+                        }
+                    }
+                }
+                editorHistory.push(text);
+                updateTextDisplay();
+            }
+            
+            function handleArrow(dir) {
+                const lines = text.split('\n');
+                let lineIdx = 0;
+                let charCount = 0;
+                
+                for (let i = 0; i < lines.length; i++) {
+                    if (charCount + lines[i].length >= cursorPos) {
+                        lineIdx = i;
+                        break;
+                    }
+                    charCount += lines[i].length + 1;
+                }
+                
+                const colPos = cursorPos - charCount;
+                
+                if (dir === '←' && cursorPos > 0) cursorPos--;
+                else if (dir === '→' && cursorPos < text.length) cursorPos++;
+                else if (dir === '↑' && lineIdx > 0) {
+                    const prevLineStart = charCount - lines[lineIdx - 1].length - 1;
+                    cursorPos = Math.min(prevLineStart + colPos, prevLineStart + lines[lineIdx - 1].length);
+                } else if (dir === '↓' && lineIdx < lines.length - 1) {
+                    const nextLineStart = charCount + lines[lineIdx].length + 1;
+                    cursorPos = Math.min(nextLineStart + colPos, nextLineStart + lines[lineIdx + 1].length);
+                }
+                
+                updateTextDisplay();
+            }
+            
+            // 3D Close button
+            const closeBtn = create3DCloseButton([0.55, 0.45, 0.026]);
+            closeBtn.userData = {
+                type: 'closeBtn',
+                onClick: () => {
+                    if (apps.editor && apps.editor.parent) {
+                        apps.editor.traverse(child => {
+                            if (child.geometry) child.geometry.dispose();
+                            if (child.material) {
+                                if (child.material.map) child.material.map.dispose();
+                                child.material.dispose();
+                            }
+                        });
+                        scene.remove(apps.editor);
+                    }
+                    apps.editor = null;
+                }
+            };
+            group.add(closeBtn);
+            
+            const dlBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.08, 0.02),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff })
+            );
+            dlBtn.position.set(-0.5, 0.45, 0.026);
+            dlBtn.userData = {
+                type: 'downloadBtn',
+                onClick: () => downloadHistory('editor')
+            };
+            group.add(dlBtn);
+            
+            group.position.set(...pos);
+            group.userData = { type: 'app', grabbable: true };
+            scene.add(group);
+            apps.editor = group;
+        }
+        
+        function createBlackjack(pos) {
+            if (apps.blackjack) {
+                apps.blackjack.traverse(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) {
+                        if (child.material.map) child.material.map.dispose();
+                        child.material.dispose();
+                    }
+                });
+                scene.remove(apps.blackjack);
+            }
+            
+            const group = new THREE.Group();
+            
+            // State
+            let runningCountHiLo = 0;
+            let runningCountWong = 0;
+            let totalDecks = 6;
+            let cardsPlayed = 0;
+            let cardCounts = {};
+            let history = [];
+            
+            const cardValuesHiLo = {
+                'A': -1, '2': 1, '3': 1, '4': 1, '5': 1, '6': 1,
+                '7': 0, '8': 0, '9': 0, '10': -1, 'J': -1, 'Q': -1, 'K': -1
+            };
+            
+            const cardValuesWong = {
+                'A': -1, '2': 0.5, '3': 1, '4': 1, '5': 1.5, '6': 1,
+                '7': 0.5, '8': 0, '9': -0.5, '10': -1, 'J': -1, 'Q': -1, 'K': -1
+            };
+            
+            const allCards = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+            
+            allCards.forEach(card => cardCounts[card] = 0);
+            
+            function getRemainingDecks() {
+                return totalDecks - (cardsPlayed / 52);
+            }
+            
+            function getTrueCountHiLo() {
+                const remaining = getRemainingDecks();
+                return remaining <= 0 ? 0 : runningCountHiLo / remaining;
+            }
+            
+            function getTrueCountWong() {
+                const remaining = getRemainingDecks();
+                return remaining <= 0 ? 0 : runningCountWong / remaining;
+            }
+            
+            // Main panel
+            const body = new THREE.Mesh(
+                new THREE.BoxGeometry(2, 1.4, 0.05),
+                new THREE.MeshStandardMaterial({ color: 0x0a0a1a, metalness: 0.8, roughness: 0.2 })
+            );
+            group.add(body);
+            
+            // Title
+            const titleCanvas = document.createElement('canvas');
+            titleCanvas.width = 1024; titleCanvas.height = 128;
+            const titleCtx = titleCanvas.getContext('2d');
+            titleCtx.fillStyle = '#000';
+            titleCtx.fillRect(0, 0, 1024, 128);
+            titleCtx.fillStyle = '#ff0066';
+            titleCtx.font = 'bold 64px Courier';
+            titleCtx.textAlign = 'center';
+            titleCtx.fillText('🃏 BLACKJACK COUNTER', 512, 80);
+            
+            const titleMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.9, 0.12),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(titleCanvas) })
+            );
+            titleMesh.position.set(0, 0.64, 0.026);
+            group.add(titleMesh);
+            
+            // Counts Display
+            const countsCanvas = document.createElement('canvas');
+            countsCanvas.width = 1024; countsCanvas.height = 256;
+            const countsCtx = countsCanvas.getContext('2d');
+            const countsTex = new THREE.CanvasTexture(countsCanvas);
+            
+            function updateCounts() {
+                countsCtx.fillStyle = '#000';
+                countsCtx.fillRect(0, 0, 1024, 256);
+                
+                // Running Counts
+                countsCtx.font = 'bold 32px Courier';
+                countsCtx.fillStyle = '#00ff00';
+                countsCtx.textAlign = 'left';
+                countsCtx.fillText('RC Hi-Lo:', 20, 50);
+                countsCtx.fillStyle = runningCountHiLo > 0 ? '#0f0' : (runningCountHiLo < 0 ? '#f00' : '#888');
+                countsCtx.fillText((runningCountHiLo > 0 ? '+' : '') + runningCountHiLo, 220, 50);
+                
+                countsCtx.fillStyle = '#ff00ff';
+                countsCtx.fillText('RC Wong:', 520, 50);
+                countsCtx.fillStyle = runningCountWong > 0 ? '#0f0' : (runningCountWong < 0 ? '#f00' : '#888');
+                countsCtx.fillText((runningCountWong > 0 ? '+' : '') + runningCountWong.toFixed(1), 720, 50);
+                
+                // True Counts
+                const tcHiLo = getTrueCountHiLo();
+                const tcWong = getTrueCountWong();
+                
+                countsCtx.font = 'bold 48px Courier';
+                countsCtx.fillStyle = '#00ffff';
+                countsCtx.textAlign = 'left';
+                countsCtx.fillText('TC Hi-Lo:', 20, 140);
+                countsCtx.fillStyle = tcHiLo > 0 ? '#0f0' : (tcHiLo < 0 ? '#f00' : '#888');
+                countsCtx.fillText((tcHiLo > 0 ? '+' : '') + tcHiLo.toFixed(2), 220, 140);
+                
+                countsCtx.fillStyle = '#ff0080';
+                countsCtx.fillText('TC Wong:', 520, 140);
+                countsCtx.fillStyle = tcWong > 0 ? '#0f0' : (tcWong < 0 ? '#f00' : '#888');
+                countsCtx.fillText((tcWong > 0 ? '+' : '') + tcWong.toFixed(2), 720, 140);
+                
+                // Remaining decks
+                countsCtx.font = 'bold 36px Courier';
+                countsCtx.fillStyle = '#ffff00';
+                countsCtx.textAlign = 'center';
+                countsCtx.fillText('Decks: ' + getRemainingDecks().toFixed(2), 512, 220);
+                
+                countsTex.needsUpdate = true;
+            }
+            
+            const countsMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.9, 0.25),
+                new THREE.MeshBasicMaterial({ map: countsTex })
+            );
+            countsMesh.position.set(0, 0.4, 0.026);
+            group.add(countsMesh);
+            updateCounts();
+            
+            // Card buttons
+            const cardLayout = [
+                ['2','3','4','5','6'],
+                ['7','8','9','10','J'],
+                ['Q','K','A']
+            ];
+            
+            const btnSize = 0.13;
+            const spacing = 0.15;
+            const startY = 0.1;
+            
+            cardLayout.forEach((row, r) => {
+                row.forEach((card, c) => {
+                    const value = cardValuesHiLo[card];
+                    const color = value === 1 ? 0x00ff00 : (value === -1 ? 0xff0066 : 0x888888);
+                    
+                    const btn = new THREE.Mesh(
+                        new THREE.BoxGeometry(btnSize, btnSize, 0.03),
+                        new THREE.MeshStandardMaterial({
+                            color: color,
+                            emissive: color,
+                            emissiveIntensity: 0.3
+                        })
+                    );
+                    
+                    const xOffset = (row.length - 1) * spacing / 2;
+                    btn.position.set(c * spacing - xOffset, startY - r * spacing, 0.036);
+                    
+                    // Card label
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 128; canvas.height = 128;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 80px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(card, 64, 64);
+                    
+                    const label = new THREE.Mesh(
+                        new THREE.PlaneGeometry(btnSize * 0.8, btnSize * 0.8),
+                        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true })
+                    );
+                    label.position.z = 0.016;
+                    btn.add(label);
+                    
+                    btn.userData = {
+                        type: 'bjCard',
+                        card: card,
+                        onClick: () => {
+                            const vHiLo = cardValuesHiLo[card];
+                            const vWong = cardValuesWong[card];
+                            runningCountHiLo += vHiLo;
+                            runningCountWong += vWong;
+                            cardsPlayed++;
+                            cardCounts[card]++;
+                            history.push({ card, vHiLo, vWong });
+                            updateCounts();
+                        }
+                    };
+                    
+                    group.add(btn);
+                });
+            });
+            
+            // UNDO button
+            const undoBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.15, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0xff8800, emissive: 0xff8800, emissiveIntensity: 0.3 })
+            );
+            undoBtn.position.set(-0.85, -0.15, 0.036);
+            
+            const undoCanvas = document.createElement('canvas');
+            undoCanvas.width = 256; undoCanvas.height = 128;
+            const undoCtx = undoCanvas.getContext('2d');
+            undoCtx.fillStyle = '#fff';
+            undoCtx.font = 'bold 48px Arial';
+            undoCtx.textAlign = 'center';
+            undoCtx.fillText('UNDO', 128, 80);
+            
+            const undoLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.23, 0.13),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(undoCanvas), transparent: true })
+            );
+            undoLabel.position.z = 0.016;
+            undoBtn.add(undoLabel);
+            
+            undoBtn.userData = {
+                type: 'undoBtn',
+                onClick: () => {
+                    if (history.length === 0) return;
+                    const last = history.pop();
+                    runningCountHiLo -= last.vHiLo;
+                    runningCountWong -= last.vWong;
+                    cardsPlayed--;
+                    cardCounts[last.card]--;
+                    updateCounts();
+                }
+            };
+            group.add(undoBtn);
+            
+            // RESET button
+            const resetBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.15, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0xffff00, emissive: 0xffff00, emissiveIntensity: 0.3 })
+            );
+            resetBtn.position.set(0.85, -0.15, 0.036);
+            
+            const resetCanvas = document.createElement('canvas');
+            resetCanvas.width = 256; resetCanvas.height = 128;
+            const resetCtx = resetCanvas.getContext('2d');
+            resetCtx.fillStyle = '#000';
+            resetCtx.font = 'bold 48px Arial';
+            resetCtx.textAlign = 'center';
+            resetCtx.fillText('RESET', 128, 80);
+            
+            const resetLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.23, 0.13),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(resetCanvas), transparent: true })
+            );
+            resetLabel.position.z = 0.016;
+            resetBtn.add(resetLabel);
+            
+            resetBtn.userData = {
+                type: 'resetBtn',
+                onClick: () => {
+                    runningCountHiLo = 0;
+                    runningCountWong = 0;
+                    cardsPlayed = 0;
+                    history = [];
+                    allCards.forEach(card => cardCounts[card] = 0);
+                    updateCounts();
+                }
+            };
+            group.add(resetBtn);
+            
+            // Decks selector
+            const decksCanvas = document.createElement('canvas');
+            decksCanvas.width = 512; decksCanvas.height = 128;
+            const decksCtx = decksCanvas.getContext('2d');
+            const decksTex = new THREE.CanvasTexture(decksCanvas);
+            
+            function updateDecks() {
+                decksCtx.fillStyle = '#000';
+                decksCtx.fillRect(0, 0, 512, 128);
+                decksCtx.fillStyle = '#00ffff';
+                decksCtx.font = 'bold 48px Courier';
+                decksCtx.textAlign = 'center';
+                decksCtx.fillText('DECKS: ' + totalDecks, 256, 80);
+                decksTex.needsUpdate = true;
+            }
+            
+            const decksMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.5, 0.12),
+                new THREE.MeshBasicMaterial({ map: decksTex })
+            );
+            decksMesh.position.set(0, -0.4, 0.026);
+            group.add(decksMesh);
+            updateDecks();
+            
+            // Deck - button
+            const deckMinusBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.12, 0.12, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0xff0066, emissive: 0xff0066, emissiveIntensity: 0.3 })
+            );
+            deckMinusBtn.position.set(-0.35, -0.4, 0.036);
+            
+            const minusCanvas = document.createElement('canvas');
+            minusCanvas.width = 128; minusCanvas.height = 128;
+            const minusCtx = minusCanvas.getContext('2d');
+            minusCtx.fillStyle = '#fff';
+            minusCtx.font = 'bold 80px Arial';
+            minusCtx.textAlign = 'center';
+            minusCtx.fillText('-', 64, 80);
+            
+            const minusLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.1, 0.1),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(minusCanvas), transparent: true })
+            );
+            minusLabel.position.z = 0.016;
+            deckMinusBtn.add(minusLabel);
+            
+            deckMinusBtn.userData = {
+                type: 'deckMinus',
+                onClick: () => {
+                    if (totalDecks > 1 && history.length === 0) {
+                        totalDecks--;
+                        updateDecks();
+                        updateCounts();
+                    }
+                }
+            };
+            group.add(deckMinusBtn);
+            
+            // Deck + button
+            const deckPlusBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.12, 0.12, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 0.3 })
+            );
+            deckPlusBtn.position.set(0.35, -0.4, 0.036);
+            
+            const plusCanvas = document.createElement('canvas');
+            plusCanvas.width = 128; plusCanvas.height = 128;
+            const plusCtx = plusCanvas.getContext('2d');
+            plusCtx.fillStyle = '#fff';
+            plusCtx.font = 'bold 80px Arial';
+            plusCtx.textAlign = 'center';
+            plusCtx.fillText('+', 64, 80);
+            
+            const plusLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.1, 0.1),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(plusCanvas), transparent: true })
+            );
+            plusLabel.position.z = 0.016;
+            deckPlusBtn.add(plusLabel);
+            
+            deckPlusBtn.userData = {
+                type: 'deckPlus',
+                onClick: () => {
+                    if (totalDecks < 8 && history.length === 0) {
+                        totalDecks++;
+                        updateDecks();
+                        updateCounts();
+                    }
+                }
+            };
+            group.add(deckPlusBtn);
+            
+            // Download history button
+            const dlBtn = new THREE.Mesh(
+                new THREE.BoxGeometry(0.25, 0.12, 0.03),
+                new THREE.MeshStandardMaterial({ color: 0x0000ff, emissive: 0x0000ff, emissiveIntensity: 0.3 })
+            );
+            dlBtn.position.set(0.6, -0.55, 0.036);
+            
+            const dlCanvas = document.createElement('canvas');
+            dlCanvas.width = 256; dlCanvas.height = 128;
+            const dlCtx = dlCanvas.getContext('2d');
+            dlCtx.fillStyle = '#fff';
+            dlCtx.font = 'bold 40px Arial';
+            dlCtx.textAlign = 'center';
+            dlCtx.fillText('📥 LOG', 128, 75);
+            
+            const dlLabel = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.23, 0.1),
+                new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(dlCanvas), transparent: true })
+            );
+            dlLabel.position.z = 0.016;
+            dlBtn.add(dlLabel);
+            
+            dlBtn.userData = {
+                type: 'downloadBtn',
+                onClick: () => {
+                    let content = '=== BLACKJACK COUNTER LOG ===\n\n';
+                    content += `Total Decks: ${totalDecks}\n`;
+                    content += `Cards Played: ${cardsPlayed}\n`;
+                    content += `Remaining Decks: ${getRemainingDecks().toFixed(2)}\n\n`;
+                    content += `Running Count Hi-Lo: ${runningCountHiLo > 0 ? '+' : ''}${runningCountHiLo}\n`;
+                    content += `Running Count Wong: ${runningCountWong > 0 ? '+' : ''}${runningCountWong.toFixed(1)}\n\n`;
+                    content += `True Count Hi-Lo: ${getTrueCountHiLo() > 0 ? '+' : ''}${getTrueCountHiLo().toFixed(2)}\n`;
+                    content += `True Count Wong: ${getTrueCountWong() > 0 ? '+' : ''}${getTrueCountWong().toFixed(2)}\n\n`;
+                    content += '=== CARD HISTORY ===\n';
+                    history.forEach((entry, i) => {
+                        content += `${i + 1}. ${entry.card} | Hi-Lo: ${entry.vHiLo > 0 ? '+' : ''}${entry.vHiLo} | Wong: ${entry.vWong > 0 ? '+' : ''}${entry.vWong.toFixed(1)}\n`;
+                    });
+                    content += '\n=== CARD COUNTS ===\n';
+                    allCards.forEach(card => {
+                        if (cardCounts[card] > 0) {
+                            content += `${card}: ${cardCounts[card]} cards\n`;
+                        }
+                    });
+                    
+                    try {
+                        const blob = new Blob([content], { type: 'text/plain' });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `blackjack_log_${Date.now()}.txt`;
+                        a.click();
+                        URL.revokeObjectURL(url);
+                    } catch (err) {
+                        console.error('Download error:', err);
+                    }
+                }
+            };
+            group.add(dlBtn);
+            
+            // History display
+            const historyCanvas = document.createElement('canvas');
+            historyCanvas.width = 1024; historyCanvas.height = 256;
+            const historyCtx = historyCanvas.getContext('2d');
+            const historyTex = new THREE.CanvasTexture(historyCanvas);
+            
+            function updateHistory() {
+                historyCtx.fillStyle = '#000';
+                historyCtx.fillRect(0, 0, 1024, 256);
+                historyCtx.fillStyle = '#00ff00';
+                historyCtx.font = 'bold 28px Courier';
+                historyCtx.textAlign = 'left';
+                historyCtx.fillText('HISTORY:', 20, 35);
+                
+                const last8 = history.slice(-8);
+                last8.forEach((entry, i) => {
+                    const y = 80 + i * 22;
+                    historyCtx.fillStyle = '#888';
+                    historyCtx.fillText(`${entry.card}:`, 20, y);
+                    historyCtx.fillStyle = entry.vHiLo > 0 ? '#0f0' : (entry.vHiLo < 0 ? '#f00' : '#888');
+                    historyCtx.fillText(`HL:${entry.vHiLo > 0 ? '+' : ''}${entry.vHiLo}`, 100, y);
+                    historyCtx.fillStyle = entry.vWong > 0 ? '#0f0' : (entry.vWong < 0 ? '#f00' : '#888');
+                    historyCtx.fillText(`W:${entry.vWong > 0 ? '+' : ''}${entry.vWong.toFixed(1)}`, 220, y);
+                });
+                
+                historyTex.needsUpdate = true;
+            }
+            
+            const historyMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(0.9, 0.25),
+                new THREE.MeshBasicMaterial({ map: historyTex })
+            );
+            historyMesh.position.set(-0.5, -0.55, 0.026);
+            group.add(historyMesh);
+            
+            // Modify card click to update history
+            group.children.forEach(child => {
+                if (child.userData && child.userData.type === 'bjCard') {
+                    const originalClick = child.userData.onClick;
+                    child.userData.onClick = () => {
+                        originalClick();
+                        updateHistory();
+                    };
+                }
+            });
+            
+            // Modify undo to update history
+            undoBtn.userData.onClick = () => {
+                if (history.length === 0) return;
+                const last = history.pop();
+                runningCountHiLo -= last.vHiLo;
+                runningCountWong -= last.vWong;
+                cardsPlayed--;
+                cardCounts[last.card]--;
+                updateCounts();
+                updateHistory();
+            };
+            
+            // Modify reset to update history
+            resetBtn.userData.onClick = () => {
+                runningCountHiLo = 0;
+                runningCountWong = 0;
+                cardsPlayed = 0;
+                history = [];
+                allCards.forEach(card => cardCounts[card] = 0);
+                updateCounts();
+                updateHistory();
+            };
+            
+            // 3D Close button
+            const closeBtn = create3DCloseButton([0.95, 0.64, 0.026]);
+            closeBtn.userData = {
+                type: 'closeBtn',
+                onClick: () => {
+                    if (apps.blackjack && apps.blackjack.parent) {
+                        apps.blackjack.traverse(child => {
+                            if (child.geometry) child.geometry.dispose();
+                            if (child.material) {
+                                if (child.material.map) child.material.map.dispose();
+                                child.material.dispose();
+                            }
+                        });
+                        scene.remove(apps.blackjack);
+                    }
+                    apps.blackjack = null;
+                }
+            };
+            group.add(closeBtn);
+            
+            group.position.set(...pos);
+            group.userData = { type: 'app', grabbable: true };
+            scene.add(group);
+            apps.blackjack = group;
+        }
+        
+        function downloadHistory(type) {
+            try {
+                let content = '';
+                if (type === 'calculator') {
+                    content = calcHistory.length > 0 ? calcHistory.join('\n') : 'No calculations yet';
+                } else {
+                    content = editorHistory.length > 0 ? editorHistory[editorHistory.length - 1] : 'No text yet';
+                }
+                
+                const blob = new Blob([content], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${type}_log_${Date.now()}.txt`;
+                a.click();
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                console.error('Download error:', err);
+                showError('Could not download file');
+            }
+        }
+        
+        function setupControllers() {
+            for (let i = 0; i < 2; i++) {
+                const controller = renderer.xr.getController(i);
+                controller.userData.index = i;
+                dolly.add(controller);
+                
+                const line = new THREE.Line(
+                    new THREE.BufferGeometry().setFromPoints([
+                        new THREE.Vector3(0, 0, 0),
+                        new THREE.Vector3(0, 0, -1)
+                    ]),
+                    new THREE.LineBasicMaterial({ color: i === 0 ? 0xff0066 : 0x0066ff })
+                );
+                line.scale.z = 5;
+                controller.add(line);
+                
+                const grip = renderer.xr.getControllerGrip(i);
+                const gripMesh = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.02, 0.03, 0.1, 8),
+                    new THREE.MeshStandardMaterial({ color: i === 0 ? 0xff0066 : 0x0066ff })
+                );
+                gripMesh.rotation.x = Math.PI / 2;
+                grip.add(gripMesh);
+                dolly.add(grip);
+                
+                controllers.push(controller);
+                grips.push(grip);
+                raycasters.push(new THREE.Raycaster());
+                
+                controller.addEventListener('selectstart', () => onSelectStart(i));
+                controller.addEventListener('squeezestart', () => onSqueezeStart(i));
+                controller.addEventListener('squeezeend', () => onSqueezeEnd(i));
+            }
+        }
+        
+        function onSelectStart(i) {
+            const tempMatrix = new THREE.Matrix4();
+            const controller = controllers[i];
+            const raycaster = raycasters[i];
+            
+            if (!controller) return;
+            
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            
+            const allObjects = [...appButtons];
+            if (apps.calc && apps.calc.parent) {
+                const calcButtons = apps.calc.children.filter(c => c.userData && c.userData.type);
+                allObjects.push(...calcButtons);
+            }
+            if (apps.editor && apps.editor.parent) {
+                const editorButtons = apps.editor.children.filter(c => c.userData && c.userData.type);
+                allObjects.push(...editorButtons);
+            }
+            if (apps.blackjack && apps.blackjack.parent) {
+                const bjButtons = apps.blackjack.children.filter(c => c.userData && (c.userData.type === 'bjCard' || c.userData.type === 'undoBtn' || c.userData.type === 'resetBtn' || c.userData.type === 'deckMinus' || c.userData.type === 'deckPlus' || c.userData.type === 'downloadBtn' || c.userData.type === 'closeBtn'));
+                allObjects.push(...bjButtons);
+            }
+            
+            const validObjects = allObjects.filter(obj => obj && obj.parent);
+            if (validObjects.length === 0) return;
+            
+            const intersects = raycaster.intersectObjects(validObjects, true);
+            
+            if (intersects.length > 0) {
+                let obj = intersects[0].object;
+                while (obj.parent && !obj.userData.type) obj = obj.parent;
+                
+                if (obj.userData && obj.userData.onClick) {
+                    obj.userData.onClick();
+                } else if (obj.userData && obj.userData.type === 'launcher') {
+                    const app = obj.userData.app;
+                    if (app === 'calculator') createCalculator([0, 1.3, 0.5]);
+                    else if (app === 'editor') createEditor([0, 1.3, 0.5]);
+                    else if (app === 'blackjack') createBlackjack([0, 1.3, 0.5]);
+                    else if (app === 'exit') exitXR();
+                }
+            }
+        }
+        
+        async function exitXR() {
+            try {
+                const session = renderer.xr.getSession();
+                if (session) {
+                    await session.end();
+                    ui.style.display = 'block';
+                    document.getElementById('controls').style.display = 'flex';
+                    modeDiv.textContent = 'Mode: Desktop';
+                }
+            } catch (err) {
+                console.error('Exit XR error:', err);
+            }
+        }
+        
+        function onSqueezeStart(i) {
+            const tempMatrix = new THREE.Matrix4();
+            const controller = controllers[i];
+            const raycaster = raycasters[i];
+            
+            if (!controller) return;
+            
+            tempMatrix.identity().extractRotation(controller.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            
+            const grabbableObjects = [...appButtons, ...floatingObjects];
+            if (clockMesh && clockMesh.parent && clockMesh.userData.grabbable) {
+                grabbableObjects.push(clockMesh);
+            }
+            if (apps.calc && apps.calc.parent && apps.calc.userData.grabbable) {
+                grabbableObjects.push(apps.calc);
+            }
+            if (apps.editor && apps.editor.parent && apps.editor.userData.grabbable) {
+                grabbableObjects.push(apps.editor);
+            }
+            if (apps.blackjack && apps.blackjack.parent && apps.blackjack.userData.grabbable) {
+                grabbableObjects.push(apps.blackjack);
+            }
+            
+            const validObjects = grabbableObjects.filter(obj => obj && obj.parent);
+            if (validObjects.length === 0) return;
+            
+            const intersects = raycaster.intersectObjects(validObjects, true);
+            
+            if (intersects.length > 0) {
+                let obj = intersects[0].object;
+                while (obj.parent && !obj.userData.grabbable) obj = obj.parent;
+                
+                if (obj.userData && obj.userData.grabbable) {
+                    grabbed[i] = obj;
+                    controller.attach(obj);
+                }
+            }
+        }
+        
+        function onSqueezeEnd(i) {
+            const obj = grabbed[i];
+            if (obj && obj.parent) {
+                scene.attach(obj);
+            }
+            delete grabbed[i];
+        }
+        
+        function updateLocomotion() {
+            const session = renderer.xr.getSession();
+            if (!session || !session.inputSources) return;
+            
+            // Handle automatic transition through walls
+            if (isTransitioning) {
+                transitionProgress += 0.02; // Smooth transition speed
+                
+                // Continue moving in transition direction
+                dolly.position.x += transitionDirection.x * 0.08;
+                dolly.position.z += transitionDirection.z * 0.08;
+                
+                // Check if we've completed the transition (crossed to other side)
+                const margin = 0.5;
+                const maxBound = 5 - margin;
+                const minBound = -5 + margin;
+                
+                let crossedToOtherSide = false;
+                
+                // Check if we're now safely on the other side
+                if (transitionDirection.x > 0 && dolly.position.x > minBound + 1) crossedToOtherSide = true;
+                if (transitionDirection.x < 0 && dolly.position.x < maxBound - 1) crossedToOtherSide = true;
+                if (transitionDirection.z > 0 && dolly.position.z > minBound + 1) crossedToOtherSide = true;
+                if (transitionDirection.z < 0 && dolly.position.z < maxBound - 1) crossedToOtherSide = true;
+                
+                if (crossedToOtherSide || transitionProgress > 1) {
+                    isTransitioning = false;
+                    transitionProgress = 0;
+                    transitionDirection = { x: 0, z: 0 };
+                }
+                
+                return; // Don't process joystick input during transition
+            }
+            
+            for (let i = 0; i < session.inputSources.length; i++) {
+                const inputSource = session.inputSources[i];
+                if (!inputSource || !inputSource.gamepad) continue;
+                
+                const gamepad = inputSource.gamepad;
+                
+                if (gamepad.axes && gamepad.axes.length >= 4) {
+                    if (inputSource.handedness === 'right') {
+                        // Right stick - locomotion
+                        const x = gamepad.axes[2];
+                        const y = gamepad.axes[3];
+                        
+                        if (Math.abs(x) > 0.1 || Math.abs(y) > 0.1) {
+                            const speed = 0.05;
+                            const angle = dolly.rotation.y;
+                            const newX = dolly.position.x + (x * Math.cos(angle) - y * Math.sin(angle)) * speed;
+                            const newZ = dolly.position.z + (x * Math.sin(angle) + y * Math.cos(angle)) * speed;
+                            
+                            // Infinite loop boundaries
+                            const margin = 0.5;
+                            const maxBound = 5 - margin;
+                            const minBound = -5 + margin;
+                            
+                            // Check if we're hitting a boundary
+                            let hitBoundary = false;
+                            let moveDir = { x: 0, z: 0 };
+                            
+                            if (newX > maxBound) {
+                                hitBoundary = true;
+                                moveDir.x = 1;
+                                dolly.position.x = minBound; // Teleport to opposite side
+                            } else if (newX < minBound) {
+                                hitBoundary = true;
+                                moveDir.x = -1;
+                                dolly.position.x = maxBound; // Teleport to opposite side
+                            } else {
+                                dolly.position.x = newX;
+                            }
+                            
+                            if (newZ > maxBound) {
+                                hitBoundary = true;
+                                moveDir.z = 1;
+                                dolly.position.z = minBound; // Teleport to opposite side
+                            } else if (newZ < minBound) {
+                                hitBoundary = true;
+                                moveDir.z = -1;
+                                dolly.position.z = maxBound; // Teleport to opposite side
+                            } else {
+                                dolly.position.z = newZ;
+                            }
+                            
+                            // Start transition effect when hitting boundary
+                            if (hitBoundary) {
+                                isTransitioning = true;
+                                transitionProgress = 0;
+                                transitionDirection = moveDir;
+                                
+                                // Trigger water effect
+                                const waterEffect = document.getElementById('waterEffect');
+                                if (waterEffect) {
+                                    waterEffect.style.display = 'block';
+                                    waterEffect.style.animation = 'none';
+                                    setTimeout(() => {
+                                        waterEffect.style.animation = 'waterWave 0.5s ease-in-out';
+                                    }, 10);
+                                    setTimeout(() => {
+                                        waterEffect.style.display = 'none';
+                                    }, 500);
+                                }
+                            }
+                        }
+                    } else if (inputSource.handedness === 'left') {
+                        // Left stick - rotation
+                        const x = gamepad.axes[2];
+                        
+                        if (Math.abs(x) > 0.1) {
+                            dolly.rotation.y -= x * 0.02;
+                        }
+                    }
+                }
+            }
+        }
+        
+        async function switchMode(mode) {
+            try {
+                const currentSession = renderer.xr.getSession();
+                if (currentSession) {
+                    await currentSession.end();
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                
+                if (mode === 'vr') {
+                    if (scene.background === null || scene.background.r === undefined) {
+                        scene.background = new THREE.Color(0x050510);
+                    }
+                    const session = await navigator.xr.requestSession('immersive-vr', {
+                        optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking']
+                    });
+                    await renderer.xr.setSession(session);
+                    modeDiv.textContent = 'Mode: VR';
+                    ui.style.display = 'none';
+                    document.getElementById('controls').style.display = 'none';
+                } else if (mode === 'ar') {
+                    scene.background = null;
+                    const session = await navigator.xr.requestSession('immersive-ar', {
+                        requiredFeatures: ['local-floor'],
+                        optionalFeatures: ['hand-tracking']
+                    });
+                    await renderer.xr.setSession(session);
+                    modeDiv.textContent = 'Mode: AR';
+                    ui.style.display = 'none';
+                    document.getElementById('controls').style.display = 'none';
+                }
+            } catch (err) {
+                showError('Error: ' + err.message);
+                console.error('XR Error:', err);
+            }
+        }
+        
+        vrBtn.addEventListener('click', () => switchMode('vr'));
+        arBtn.addEventListener('click', () => switchMode('ar'));
+        
+        function animate() {
+            time += 0.005; // Slow time increment
+            
+            updateLocomotion();
+            
+            // Update clock once per second
+            const currentTime = Date.now();
+            if (clockMesh && clockMesh.userData.updateClock && currentTime - lastClockUpdate > 100) {
+                clockMesh.userData.updateClock();
+                lastClockUpdate = currentTime;
+            }
+            
+            // Animate floating objects (VERY slow and smooth)
+            floatingObjects.forEach(obj => {
+                if (!obj.parent) return; // Skip if removed from scene
+                
+                const isGrabbed = Object.values(grabbed).includes(obj);
+                if (!isGrabbed) {
+                    // VERY Smooth rotation (slow motion effect)
+                    obj.rotation.x += obj.userData.rotationSpeed * 0.3;
+                    obj.rotation.y += obj.userData.rotationSpeed * 1.3 * 0.3;
+                    
+                    // Smooth floating
+                    obj.position.y = obj.userData.initialY + 
+                        Math.sin(time * obj.userData.floatSpeed + obj.userData.floatOffset) * obj.userData.floatAmplitude;
+                    
+                    // Update light position
+                    if (obj.userData.light && obj.userData.light.parent) {
+                        obj.userData.light.position.copy(obj.position);
+                    }
+                }
+            });
+            
+            // Animate holograms (very slow and smooth)
+            holograms.forEach(holo => {
+                if (!holo.parent) return; // Skip if removed from scene
+                
+                // Skip animation if object is being grabbed
+                const isGrabbed = Object.values(grabbed).includes(holo);
+                if (isGrabbed) return;
+                
+                if (holo.userData.isHologram) {
+                    // Gentle float
+                    holo.position.y = holo.userData.initialY + 
+                        Math.sin(time * holo.userData.floatSpeed + holo.userData.floatOffset) * 0.1;
+                    
+                    // Gentle pulse opacity
+                    const pulse = Math.sin(time * holo.userData.pulseSpeed) * 0.1 + 0.9;
+                    holo.children.forEach(child => {
+                        if (child.material && child.material.opacity !== undefined) {
+                            if (child.material.map) {
+                                child.material.opacity = pulse * 0.9;
+                            } else {
+                                child.material.opacity = pulse * 0.15;
+                            }
+                        }
+                    });
+                } else if (holo.userData.isHologramRing) {
+                    // Slow rotation
+                    holo.rotation.x += holo.userData.rotationSpeed;
+                    holo.rotation.y += holo.userData.rotationSpeed * 0.7;
+                    
+                    // Gentle float
+                    holo.position.y = holo.userData.initialY + 
+                        Math.sin(time * holo.userData.floatSpeed + holo.userData.floatOffset) * 0.15;
+                }
+            });
+            
+            // Animate digital rain particles (MUCH slower - slow motion effect)
+            scene.children.forEach(child => {
+                if (child.userData.isParticles) {
+                    const positions = child.geometry.attributes.position.array;
+                    for (let i = 0; i < positions.length; i += 3) {
+                        positions[i + 1] -= 0.002; // MUCH slower fall (slow motion)
+                        if (positions[i + 1] < 0) {
+                            positions[i + 1] = 5; // Reset to top
+                        }
+                    }
+                    child.geometry.attributes.position.needsUpdate = true;
+                    child.rotation.y += 0.0001; // Slower rotation
+                }
+            });
+            
+            renderer.render(scene, camera);
+        }
+        
+        init();
